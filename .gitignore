@@ -1,0 +1,35 @@
+# Cargo build artifacts
+/target/
+
+# Compiled library files
+*.rlib
+
+# Rust intermediate files
+*.d
+
+# Package metadata
+*.lock
+
+# MacOS specific files
+.DS_Store
+
+# Rust cache
+/cargo/
+
+# Configuration files from Rust toolchain or editors
+.idea/
+.vscode/
+
+# Editor-specific files (common ones for macOS)
+*.swp
+*.swo
+*~
+
+# Ignore backup files
+*~
+
+# Ignore dependency directories
+/.cargo
+
+# Ignore generated docs
+/target/doc/
