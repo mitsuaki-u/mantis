@@ -1,8 +1,19 @@
 use std::future::Future;
 use std::time::Duration;
-use log::{warn, trace, info};
-use crate::error::{Error, Result};
+use log::{warn, trace, info, debug};
+use crate::core::error::{Error, Result};
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::collections::HashMap;
+use once_cell::sync::Lazy;
+
+// Track retry frequencies to avoid log spam
+static RETRY_COUNTERS: Lazy<Mutex<HashMap<String, (usize, SystemTime)>>> = 
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+// How often to log repeated retries of the same operation (in seconds)
+const RETRY_LOG_INTERVAL: u64 = 60;
 
 /// Determines if an error is transient and can be retried
 pub fn is_retriable_error(err: &Error) -> bool {
@@ -16,11 +27,10 @@ pub fn is_retriable_error(err: &Error) -> bool {
         Error::RateLimit(_) => true, // Rate limits are always retriable after some time
         Error::Database(db_err) => {
             // Some database errors are transient (locked, busy)
-            matches!(db_err, 
-                rusqlite::Error::SqliteFailure(code, _) if
-                    code.code == rusqlite::ffi::ErrorCode::DatabaseBusy ||
-                    code.code == rusqlite::ffi::ErrorCode::DatabaseLocked
-            )
+            db_err.contains("database is locked") || 
+            db_err.contains("database is busy") || 
+            db_err.contains("unable to open database file") || 
+            db_err.contains("disk i/o error")
         },
         _ => false,
     }
@@ -64,6 +74,47 @@ pub fn get_retry_backoff(err: &Error, current_attempt: usize, base_backoff: Dura
     }
 }
 
+/// Check if we should log this retry based on rate limiting
+fn should_log_retry(operation_name: &str, attempt: usize) -> bool {
+    // Always log the first retry
+    if attempt == 1 {
+        return true;
+    }
+    
+    let now = SystemTime::now();
+    let mut counters = match RETRY_COUNTERS.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            // If we can't lock, just allow logging
+            return true;
+        }
+    };
+    
+    // Check if we've seen this operation recently
+    if let Some((last_attempt, last_time)) = counters.get(operation_name) {
+        // If it's been a while since we logged this operation, log it again
+        if let Ok(elapsed) = now.duration_since(*last_time) {
+            if elapsed.as_secs() > RETRY_LOG_INTERVAL {
+                counters.insert(operation_name.to_string(), (attempt, now));
+                return true;
+            }
+        }
+        
+        // If the attempt number is significantly different, log it
+        if *last_attempt > 0 && (attempt / 2) > *last_attempt {
+            counters.insert(operation_name.to_string(), (attempt, now));
+            return true;
+        }
+        
+        // Otherwise, don't log to avoid spam
+        false
+    } else {
+        // First time seeing this operation, log it
+        counters.insert(operation_name.to_string(), (attempt, now));
+        true
+    }
+}
+
 /// Execute an async operation with retry logic for transient errors
 pub async fn with_retry<T, F, Fut>(
     operation_name: &str,
@@ -79,18 +130,23 @@ where
     
     loop {
         attempt += 1;
-        trace!("Executing operation '{}' (attempt {}/{})", 
-            operation_name, attempt, max_retries + 1);
+        
+        // Only log at trace level and only on the first attempt or periodically
+        if attempt == 1 {
+            trace!("Executing operation '{}'", operation_name);
+        }
             
         match f().await {
             Ok(result) => {
+                // Only log success after retries to reduce noise
                 if attempt > 1 {
-                    info!("Operation '{}' succeeded after {} attempts", operation_name, attempt);
+                    debug!("Operation '{}' succeeded after {} attempts", operation_name, attempt);
                 }
                 return Ok(result);
             },
             Err(err) => {
                 if attempt > max_retries || !is_retriable_error(&err) {
+                    // Only log final failures at warning level
                     if attempt > 1 {
                         warn!("Operation '{}' failed after {} attempts: {}", 
                             operation_name, attempt, err);
@@ -106,8 +162,12 @@ where
                 }
                 
                 let backoff = get_retry_backoff(&err, attempt, base_backoff);
-                warn!("Attempt {} for '{}' failed: {}. Retrying in {:?}...", 
-                    attempt, operation_name, err, backoff);
+                
+                // Rate limit logging to avoid spamming logs
+                if should_log_retry(operation_name, attempt) {
+                    debug!("Attempt {} for '{}' failed: {}. Retrying in {:?}...", 
+                        attempt, operation_name, err, backoff);
+                }
                     
                 tokio::time::sleep(backoff).await;
             }
