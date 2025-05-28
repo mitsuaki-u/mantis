@@ -3,10 +3,9 @@
 // use rusqlite::OptionalExtension;
 
 // Add PostgreSQL imports
-use deadpool_postgres::{
-    Config as DeadpoolConfig, ManagerConfig, PoolError, RecyclingMethod, Runtime,
-};
-use tokio_postgres::{Error as PgError, NoTls};
+use deadpool_postgres::{PoolError, Runtime};
+// use tokio_postgres::{Error as PgError, NoTls}; // Removed PgError import
+use tokio_postgres::NoTls; // Keep NoTls
 
 use crate::core::config::Config;
 use crate::core::error::{Error, Result};
@@ -91,15 +90,6 @@ pub struct PriceData {
     pub timestamp: DateTime<Utc>,
 }
 
-// Function to convert PostgreSQL errors
-fn convert_pg_error(e: PgError) -> Error {
-    Error::Database(e.to_string())
-}
-
-fn convert_pool_error(e: PoolError) -> Error {
-    Error::Database(format!("Connection pool error: {}", e))
-}
-
 // Define connection pool types for PostgreSQL
 pub type Pool = deadpool_postgres::Pool;
 pub type Client = deadpool_postgres::Client;
@@ -108,7 +98,6 @@ pub type Client = deadpool_postgres::Client;
 #[derive(Clone)]
 pub struct Database {
     pool: Arc<Pool>,
-    query_logging: bool,
 }
 
 impl Database {
@@ -147,7 +136,6 @@ impl Database {
 
         let db = Self {
             pool: Arc::new(pool),
-            query_logging: db_config.query_logging,
         };
 
         // Perform initial connection test and schema initialization
@@ -206,7 +194,12 @@ impl Database {
         // Spawn the connection task
         tokio::spawn(async move {
             if let Err(e) = connection.await {
-                error!("PostgreSQL connection error during reset: {}", e);
+                // Check if this is due to shutdown
+                if crate::domain::trading::execution::bot::is_forced_shutdown() {
+                    info!("PostgreSQL connection task during reset: Global shutdown detected, connection closed gracefully");
+                } else {
+                    error!("PostgreSQL connection error during reset: {}", e);
+                }
             }
         });
 
@@ -230,7 +223,7 @@ impl Database {
 
         // Re-initialize using the normal pool mechanism to run schema creation
         info!("Re-initializing database connection and schema...");
-        let db = Database::new(config).await?;
+        Database::new(config).await?;
         // initialize_db is called within new(), so schema should be created.
 
         info!("PostgreSQL database reset completed successfully");
@@ -333,6 +326,17 @@ impl Database {
     // - static_configure_connection
     // - initialize_connection
     // - from_config (replaced by async new)
+
+    #[cfg(test)]
+    pub async fn new_test_db() -> Result<Self> {
+        let config = Config::default(); // Use default config for tests
+        let db = Database::new(&config).await?;
+        // For a test DB, we likely want to ensure it's clean
+        // This might be handled by test setup/teardown, or explicitly here.
+        // For now, new_test_db will just create/connect and init schema via Database::new.
+        // If we want to return the db instance, we need to assign it without underscore.
+        Ok(db)
+    }
 }
 
 // Removed TradingStats struct if only used here
@@ -369,4 +373,24 @@ pub fn is_paper_trading() -> bool {
             false // Default to false (live) on error for safety
         }
     }
+}
+
+#[cfg(test)]
+async fn test_database_connection() {
+    let config = Config::default(); // Use default config for testing
+    let db = Database::new(&config)
+        .await
+        .expect("Failed to connect to test database");
+    // Perform some simple operations
+    db.test_connection()
+        .await
+        .expect("Basic connection test failed");
+    db.test_write_permission()
+        .await
+        .expect("Write permission test failed");
+    info!("Test database connection and write permissions successful.");
+}
+
+fn convert_pool_error(e: PoolError) -> Error {
+    Error::Database(format!("Connection pool error: {}", e))
 }

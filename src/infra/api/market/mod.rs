@@ -6,18 +6,11 @@ pub mod providers;
 use crate::core::config::Config;
 use crate::core::error::{Error, Result};
 use crate::core::models::market::{MarketOptions, MarketOverview, TokenMetrics, TrendingToken};
-use crate::core::models::token::{DataProvider, TokenData};
-use crate::infra::api::adapters;
-use crate::utils::retry::with_retry;
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use log::{debug, info, warn};
 pub use providers::{MarketDataEvent, MarketDataProvider};
-use reqwest::Client;
-use serde::Deserialize;
 use serde_json::Value;
-use std::time::Duration;
-use tokio::sync::mpsc::{self, Sender};
+use tokio::sync::mpsc::Sender;
 use tokio::try_join;
 
 /// Events emitted by market data providers
@@ -213,24 +206,6 @@ fn parse_trending_tokens(data: &Value) -> Result<Vec<TrendingToken>> {
         })
         .collect();
     Ok(tokens)
-}
-
-// Parse market data (assumes CoinGecko format)
-fn parse_market_data(data: &Value) -> Result<Vec<TokenMetrics>> {
-    let tokens_data: Result<Vec<TokenData>> = data
-        .as_array()
-        .ok_or_else(|| Error::Parse("Market data is not an array".to_string()))?
-        .iter()
-        .map(|coin_json_value| adapters::convert_coingecko_to_token_data(coin_json_value))
-        .collect();
-
-    // Convert Vec<TokenData> to Vec<TokenMetrics>
-    let metrics: Vec<TokenMetrics> = tokens_data?
-        .into_iter()
-        .map(|td| TokenMetrics::from(&td)) // Assumes From<&TokenData> for TokenMetrics exists
-        .collect();
-
-    Ok(metrics)
 }
 
 // Don't re-export internal API modules

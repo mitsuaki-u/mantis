@@ -1,5 +1,5 @@
 use crate::core::error::{Error, Result};
-use crate::domain::trading::strategy::Position;
+use crate::domain::trading::strategy::Position as StrategyPosition;
 // use crate::infra::db::database::Client as PgClient; // Removed unused
 use crate::infra::db::queries;
 use crate::infra::db::Database;
@@ -44,6 +44,16 @@ impl From<PositionError> for Error {
     }
 }
 
+#[derive(Debug)]
+pub struct RecordCloseArgs<'a> {
+    pub token_id: &'a str,
+    pub exit_price: f64,
+    pub size: f64,
+    pub entry_price: f64,
+    pub entry_time: chrono::DateTime<Utc>,
+    pub exit_time: chrono::DateTime<Utc>,
+}
+
 #[derive(Clone)]
 pub struct PositionRepository {
     db: Database,
@@ -61,7 +71,7 @@ impl PositionRepository {
     }
 
     /// Get all open positions (async)
-    pub async fn get_open_positions(&self) -> Result<Vec<Position>> {
+    pub async fn get_open_positions(&self) -> Result<Vec<StrategyPosition>> {
         debug!("Getting open positions (paper: {})", self.is_paper_trade);
         let client = self.db.get_connection().await?;
 
@@ -76,10 +86,9 @@ impl PositionRepository {
         let mut positions = Vec::with_capacity(rows.len());
         for row in rows {
             let entry_time: DateTime<Utc> = row.get(7);
-            positions.push(Position {
+            positions.push(StrategyPosition {
                 token_id: row.get(1),
                 provider_id: row.get(2),
-                coingecko_id: row.get(2), // Assuming provider_id is coingecko_id
                 entry_price: row.get(3),
                 current_price: row.get(4),
                 highest_price: row.get(5),
@@ -96,7 +105,7 @@ impl PositionRepository {
     /// Record a new position opening with its associated trade (async)
     pub async fn record_position_with_trade(
         &self,
-        position: &Position,
+        position: &StrategyPosition,
         price: f64,
         size: f64,
         timestamp: chrono::DateTime<Utc>,
@@ -222,32 +231,26 @@ impl PositionRepository {
     pub async fn record_position_close_with_trade(
         &self,
         position_id: i64,
-        token_id: &str,
-        exit_price: f64,
-        size: f64,
-        entry_price: f64,
-        entry_time: chrono::DateTime<Utc>,
-        exit_time: chrono::DateTime<Utc>,
+        args: RecordCloseArgs<'_>,
     ) -> Result<CompletedPosition> {
-        if size <= 0.0 || exit_price <= 0.0 {
+        if args.size <= 0.0 || args.exit_price <= 0.0 {
             return Err(PositionError::InvalidData(format!(
                 "Invalid position data: size={}, exit_price={}",
-                size, exit_price
+                args.size, args.exit_price
             ))
             .into());
         }
 
         // Calculations remain the same
-        // ... (profit, roi, fee, net_profit calculation) ...
-        let profit = size * (exit_price - entry_price);
-        let roi = if entry_price == 0.0 {
+        let profit = args.size * (args.exit_price - args.entry_price);
+        let roi = if args.entry_price == 0.0 {
             0.0
         } else {
-            (exit_price - entry_price) / entry_price * 100.0
+            (args.exit_price - args.entry_price) / args.entry_price * 100.0
         };
-        let fee_rate = 0.001;
-        let entry_fee = size * entry_price * fee_rate;
-        let exit_fee = size * exit_price * fee_rate;
+        let fee_rate = 0.001; // TODO: Get from config
+        let entry_fee = args.size * args.entry_price * fee_rate;
+        let exit_fee = args.size * args.exit_price * fee_rate;
         let total_fee = entry_fee + exit_fee;
         let net_profit = profit - total_fee;
 
@@ -273,11 +276,11 @@ impl PositionRepository {
             .query_one(
                 queries::trade::INSERT_TRADE_SELL,
                 &[
-                    &token_id as &(dyn ToSql + Sync),
+                    &args.token_id as &(dyn ToSql + Sync),
                     &provider_id,
-                    &exit_price,
-                    &size,
-                    &exit_time,
+                    &args.exit_price,
+                    &args.size,
+                    &args.exit_time,
                     &self.is_paper_trade,
                     &position_id,
                 ],
@@ -291,9 +294,9 @@ impl PositionRepository {
             .execute(
                 queries::position::CLOSE_POSITION,
                 &[
-                    &exit_price as &(dyn ToSql + Sync),
+                    &args.exit_price as &(dyn ToSql + Sync),
                     &profit, // Use calculated profit
-                    &exit_time,
+                    &args.exit_time,
                     &trade_id,            // Link the sell trade ID
                     &position_id,         // WHERE condition
                     &self.is_paper_trade, // WHERE condition
@@ -318,17 +321,17 @@ impl PositionRepository {
             .map_err(|e| Error::Database(e.to_string()))?;
 
         info!("✅ Closed position ID {} for {} with size ${:.2}, entry ${:.4}, exit ${:.4}, profit ${:.2}", 
-                position_id, token_id, size, entry_price, exit_price, profit);
+                position_id, args.token_id, args.size, args.entry_price, args.exit_price, profit);
 
         // Construct and return CompletedPosition
         let completed_position = CompletedPosition {
             id: position_id,
-            token_id: token_id.to_string(),
-            size,
-            entry_price,
-            exit_price,
-            entry_time,
-            exit_time,
+            token_id: args.token_id.to_string(),
+            size: args.size,
+            entry_price: args.entry_price,
+            exit_price: args.exit_price,
+            entry_time: args.entry_time,
+            exit_time: args.exit_time,
             profit,
             roi,
             fees: total_fee,
@@ -342,7 +345,7 @@ impl PositionRepository {
         &self,
         token_id: &str,
         price: f64,
-        highest_price: f64,
+        _highest_price: f64,
     ) -> Result<()> {
         // No need for internal method or spawn_blocking anymore
         let client = self.db.get_connection().await?;
@@ -459,11 +462,28 @@ impl PositionRepository {
         Ok(count > 0)
     }
 
+    /// Get the provider_id for an open position by its canonical token ID (async)
+    pub async fn get_provider_id_for_token(
+        &self,
+        canonical_token_id: &str,
+    ) -> Result<Option<String>> {
+        let client = self.db.get_connection().await?;
+        let row_opt = client
+            .query_opt(
+                "SELECT provider_id FROM positions WHERE token_id = LOWER($1) AND is_paper = $2 AND closed = FALSE",
+                &[&canonical_token_id as &(dyn ToSql + Sync), &self.is_paper_trade],
+            )
+            .await
+            .map_err(|e| Error::Database(e.to_string()))?;
+
+        Ok(row_opt.map(|row| row.get(0)))
+    }
+
     /// Get an open position by token ID, including its database ID (async)
     pub async fn get_position_by_token_id(
         &self,
         token_id: &str,
-    ) -> Result<Option<(i64, Position)>> {
+    ) -> Result<Option<(i64, StrategyPosition)>> {
         let client = self.db.get_connection().await?;
 
         let row_opt = client
@@ -478,10 +498,9 @@ impl PositionRepository {
             Some(row) => {
                 let id: i64 = row.get(0);
                 let entry_time: DateTime<Utc> = row.get(7);
-                let position = Position {
+                let position = StrategyPosition {
                     token_id: row.get(1),
                     provider_id: row.get(2),
-                    coingecko_id: row.get(2),
                     entry_price: row.get(3),
                     current_price: row.get(4),
                     highest_price: row.get(5),

@@ -360,6 +360,12 @@ impl MarketDataProvider for CoinCapProvider {
                 info!("📊 CoinCap WebSocket message processing started");
 
                 while *is_connected.read().await {
+                    // Check global shutdown flag
+                    if crate::domain::trading::execution::bot::is_forced_shutdown() {
+                        info!("CoinCap WebSocket: Global shutdown detected, exiting");
+                        break;
+                    }
+
                     match ws_stream.next().await {
                         Some(Ok(msg)) => {
                             debug!(

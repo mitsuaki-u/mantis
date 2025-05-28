@@ -2,27 +2,23 @@ use crate::core::config::Config;
 use crate::core::error::Error;
 use crate::domain::dex::DexClient;
 use crate::domain::trading::indicators::IndicatorWeights;
-use crate::domain::trading::strategy::{MomentumStrategy, Position, Strategy};
+use crate::domain::trading::strategy::{MomentumStrategy, Strategy};
 use crate::infra::actors::{
-    Actor, ActorRef, Command, DatabaseActor, ExecutionActor, MarketDataActor, Message, MessageBus,
-    RiskManagerActor, StrategyActor, SupervisorActor,
+    DatabaseActor, ExecutionActor, MarketDataActor, MessageBus, RiskManagerActor, StrategyActor,
+    SupervisorActor,
 };
-use crate::infra::actors::{Event, RiskEvent};
-use crate::infra::api::market::{create_market_api, MarketApi, MarketDataProvider};
+use crate::infra::api::market::{create_market_api, MarketDataProvider};
 use crate::infra::db::repositories::RepositoryFactory;
 use crate::infra::db::Database;
-use chrono::Utc;
 use dirs;
 use futures::pin_mut;
 use log::{debug, error, info, trace, warn};
 use serde_json::{self, json};
-use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use tokio::sync::mpsc;
-use tokio::time::{interval, timeout, Duration};
+use tokio::time::{timeout, Duration};
 
 // Global shutdown flag to ensure all tasks exit
 static FORCE_SHUTDOWN: AtomicBool = AtomicBool::new(false);
@@ -54,7 +50,6 @@ pub struct TradingBotSystem {
     config: Arc<Config>,
     /// Database instance
     db: Database, // Store Database object directly
-    shutdown_flag: Arc<AtomicBool>,
 }
 
 impl TradingBotSystem {
@@ -80,7 +75,6 @@ impl TradingBotSystem {
             database_actor_ref: None,
             config: Arc::new(config),
             db, // Store the db object
-            shutdown_flag: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -109,11 +103,23 @@ impl TradingBotSystem {
         strategy_name: &str,
         params: &serde_json::Value,
     ) -> Result<(), Error> {
+        println!(
+            "DEBUG: TradingBotSystem::start() called with strategy: {}",
+            strategy_name
+        );
+
+        if self.running {
+            return Err(Error::InvalidInput(
+                "Trading bot is already running".to_string(),
+            ));
+        }
+
         info!(
             "Starting trading bot system with {} strategy",
             strategy_name
         );
 
+        println!("DEBUG: Creating strategy from name and params");
         // Create the strategy instance
         let strategy = match strategy_name {
             "momentum" => {
@@ -165,47 +171,29 @@ impl TradingBotSystem {
                 crate::trading::strategy::Strategy::new(Box::new(strategy))
             }
             "mock" => {
-                let threshold = params["threshold"].as_f64().unwrap_or(5.0);
-                let min_volume = params["min_volume"].as_f64().unwrap_or(100000.0);
-                let stop_loss = params["stop_loss"].as_f64().unwrap_or(5.0);
-                let risk_tolerance = params["risk_tolerance"].as_u64().map(|r| r as u8);
-
-                // Create base mock strategy
-                let mut mock_strategy =
-                    crate::trading::strategy::MockStrategy::new(threshold, min_volume, stop_loss);
-
-                // Configure mock strategy based on risk tolerance
-                if let Some(level) = risk_tolerance {
-                    let hold_duration = match level {
-                        0 => 300, // Conservative: 5 minutes
-                        1 => 240, // Conservative-Moderate: 4 minutes
-                        2 => 180, // Moderate: 3 minutes
-                        3 => 120, // Moderate-Aggressive: 2 minutes
-                        4 => 60,  // Aggressive: 1 minute
-                        _ => 30,  // Very Aggressive: 30 seconds
-                    };
-                    mock_strategy = mock_strategy.with_hold_duration(hold_duration);
-
-                    let success_rate = match level {
-                        0 => 0.7,  // Conservative: 70% success
-                        1 => 0.65, // Conservative-Moderate: 65% success
-                        2 => 0.6,  // Moderate: 60% success
-                        3 => 0.55, // Moderate-Aggressive: 55% success
-                        4 => 0.5,  // Aggressive: 50% success
-                        _ => 0.45, // Very Aggressive: 45% success
-                    };
-                    mock_strategy = mock_strategy.with_success_rate(success_rate);
+                // Mock strategy is temporarily disabled, use momentum strategy for testing
+                warn!("Mock strategy is temporarily disabled, using momentum strategy for testing");
+                match crate::domain::trading::strategy::create_strategy(
+                    "momentum",
+                    params["threshold"].as_f64().unwrap_or(0.7),
+                    100_000.0,                // min_volume
+                    5.0,                      // stop_loss_pct
+                    Some(5),                  // min_data_points (reduced for testing)
+                    None,                     // risk_tolerance
+                    Some("fast".to_string()), // testing_mode
+                ) {
+                    Ok(strategy) => strategy,
+                    Err(e) => {
+                        error!(
+                            "Failed to create momentum strategy as mock replacement: {}",
+                            e
+                        );
+                        return Err(Error::InvalidInput(format!(
+                            "Failed to create momentum strategy as mock replacement: {}",
+                            e
+                        )));
+                    }
                 }
-
-                // Set signal interval based on market scan interval if available
-                let interval = params["interval"].as_u64().unwrap_or(60);
-                mock_strategy = mock_strategy.with_signal_interval(interval);
-
-                info!(
-                    "🧪 Created mock strategy for testing with signal interval: {}s",
-                    interval
-                );
-                crate::trading::strategy::Strategy::new(Box::new(mock_strategy))
             }
             _ => {
                 error!("Unsupported strategy: {}", strategy_name);
@@ -215,10 +203,14 @@ impl TradingBotSystem {
                 )));
             }
         };
+        println!("DEBUG: Strategy created: {:?}", strategy);
 
+        println!("DEBUG: Starting actor system");
         // Start the actor system
         self.start_actor_system(strategy).await?;
+        println!("DEBUG: Actor system started successfully");
 
+        println!("DEBUG: TradingBotSystem::start() completed");
         Ok(())
     }
 
@@ -427,69 +419,6 @@ impl TradingBotSystem {
         Ok(metrics)
     }
 
-    // TODO: This is not even being used, remove?
-    /// Get the current positions from the execution actor
-    pub async fn get_positions(&self) -> Result<Vec<Position>, Error> {
-        if !self.running {
-            return Err(Error::InvalidInput(
-                "Trading bot is not running".to_string(),
-            ));
-        }
-
-        if let Some(ref execution_ref) = self.execution_actor_ref {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            execution_ref
-                .send(crate::actors::Message::Query(
-                    crate::actors::Query::GetMetrics,
-                    tx,
-                ))
-                .await?;
-
-            match rx.await {
-                Ok(Ok(crate::actors::QueryResult::Metrics(metrics))) => {
-                    if let Some(positions_json) = metrics.get("positions") {
-                        if let Some(positions_array) = positions_json.as_array() {
-                            let mut positions = Vec::new();
-                            for pos in positions_array {
-                                if let (Some(token_id), Some(entry_price), Some(size)) = (
-                                    pos.get("token_id").and_then(|v| v.as_str()),
-                                    pos.get("entry_price").and_then(|v| v.as_f64()),
-                                    pos.get("size").and_then(|v| v.as_f64()),
-                                ) {
-                                    positions.push(Position {
-                                        token_id: token_id.to_string(),
-                                        provider_id: token_id.to_string(), // Use token_id as provider_id
-                                        coingecko_id: token_id.to_string(), // Also use token_id for coingecko_id
-                                        entry_price,
-                                        current_price: entry_price,
-                                        highest_price: entry_price,
-                                        size,
-                                        unrealized_pnl: 0.0,
-                                        entry_time: Utc::now(),
-                                    });
-                                }
-                            }
-                            return Ok(positions);
-                        }
-                    }
-                    Err(Error::Parse(
-                        "Failed to parse positions from metrics".to_string(),
-                    ))
-                }
-                Ok(Ok(_)) => Err(Error::Parse("Unexpected query result type".to_string())),
-                Ok(Err(e)) => Err(e),
-                Err(e) => Err(Error::Task(format!(
-                    "Failed to receive query response: {}",
-                    e
-                ))),
-            }
-        } else {
-            Err(Error::InvalidInput(
-                "Execution actor not initialized".to_string(),
-            ))
-        }
-    }
-
     /// Update configuration for all actors
     pub async fn update_config(&self, config: &serde_json::Value) -> Result<(), Error> {
         if !self.running {
@@ -596,13 +525,20 @@ impl TradingBotSystem {
             tokio::select! {
                 // Sleep for a few seconds before checking again
                 _ = tokio::time::sleep(tokio::time::Duration::from_secs(2)) => {
-                    // Checkpoint state
-                    if let Err(e) = self.checkpoint_state().await {
-                        warn!("Failed to checkpoint trading bot state: {}", e);
-                    } else {
-                        checkpoint_count += 1;
-                        if checkpoint_count % 5 == 0 {
-                            debug!("Trading bot still running, checkpoint count: {}", checkpoint_count);
+                    // Checkpoint state with timeout to prevent blocking Ctrl-C
+                    let checkpoint_future = self.checkpoint_state();
+                    match tokio::time::timeout(tokio::time::Duration::from_secs(1), checkpoint_future).await {
+                        Ok(Ok(())) => {
+                            checkpoint_count += 1;
+                            if checkpoint_count % 5 == 0 {
+                                debug!("Trading bot still running, checkpoint count: {}", checkpoint_count);
+                            }
+                        },
+                        Ok(Err(e)) => {
+                            warn!("Failed to checkpoint trading bot state: {}", e);
+                        },
+                        Err(_) => {
+                            warn!("Checkpoint operation timed out after 1 second, skipping to ensure responsiveness");
                         }
                     }
                 },
@@ -724,30 +660,13 @@ impl TradingBotSystem {
             ));
         }
 
-        // Get the current status
-        let status = match self.get_status().await {
-            Ok(s) => s,
-            Err(e) => {
-                warn!("Failed to get status for checkpoint: {}", e);
-                return Err(e);
-            }
-        };
-
-        // Get metrics if possible
-        let metrics = self.get_metrics().await.unwrap_or_else(|e| {
-            warn!("Failed to get metrics for checkpoint: {}", e);
-            json!({
-                "error": format!("Failed to get metrics: {}", e)
-            })
-        });
-
-        // Create a combined state object
+        // Create a lightweight checkpoint without querying all actors
+        // This prevents blocking the main loop and Ctrl-C handling
         let checkpoint = json!({
             "timestamp": chrono::Utc::now().to_rfc3339(),
-            "status": status,
-            "metrics": metrics,
+            "running": self.running,
+            "paper_trading": self.config.trading.paper_trading,
             "config": {
-                "paper_trading": self.config.trading.paper_trading,
                 "scan_interval": self.config.data_collection.interval,
                 "max_position_size": self.config.trading.max_position_size,
                 "risk": {
@@ -861,7 +780,7 @@ impl TradingBotSystem {
             ))
             .await?;
 
-        match tokio::time::timeout(Duration::from_secs(5), rx).await {
+        match tokio::time::timeout(Duration::from_secs(1), rx).await {
             Ok(Ok(Ok(crate::actors::QueryResult::Status(status)))) => Ok(status),
             Ok(Ok(Ok(_))) => Err(Error::Parse(
                 "Unexpected query result type for status".to_string(),
@@ -890,7 +809,7 @@ impl TradingBotSystem {
             ))
             .await?;
 
-        match tokio::time::timeout(Duration::from_secs(5), rx).await {
+        match tokio::time::timeout(Duration::from_secs(1), rx).await {
             Ok(Ok(Ok(crate::actors::QueryResult::Metrics(metrics)))) => Ok(metrics),
             Ok(Ok(Ok(_))) => Err(Error::Parse(
                 "Unexpected query result type for metrics".to_string(),
@@ -908,6 +827,7 @@ impl TradingBotSystem {
 
     /// Start the actor system with the given strategy
     async fn start_actor_system(&mut self, strategy: Strategy) -> Result<(), Error> {
+        println!("DEBUG: start_actor_system() called");
         info!("Starting actor system with strategy: {:?}", strategy);
 
         // Log wide scan mode status early
@@ -917,6 +837,7 @@ impl TradingBotSystem {
             info!("🔍 Wide scan mode is DISABLED - the system will ONLY process specifically tracked tokens");
         }
 
+        println!("DEBUG: Creating supervisor");
         // Create the supervisor first - it will manage all other actors
         let supervisor_obj =
             SupervisorActor::new(self.message_bus.clone()).with_health_check_interval(30); // Check health every 30 seconds
@@ -930,7 +851,9 @@ impl TradingBotSystem {
         // Also register it globally so it can be found from anywhere during recovery
         info!("Registering supervisor in global registry for recovery operations");
         SupervisorActor::register_as_global(supervisor_arc);
+        println!("DEBUG: Supervisor created and registered");
 
+        println!("DEBUG: Creating repositories");
         // Create repositories using the stored db instance
         let repo_factory = RepositoryFactory::new(self.db.clone(), self.config.clone());
 
@@ -940,6 +863,7 @@ impl TradingBotSystem {
 
         let token_repo = repo_factory.token_repository();
         let pos_repo = repo_factory.position_repository();
+        println!("DEBUG: Repositories created");
 
         // Get the tokens to track
         let tokens_to_track = self.get_tokens_to_track();
@@ -948,6 +872,7 @@ impl TradingBotSystem {
             tokens_to_track.join(", ")
         );
 
+        println!("DEBUG: Creating market actor");
         // Create the market data actor
         let market_api = self.create_market_api()?;
         let market_actor = MarketDataActor::new(
@@ -957,47 +882,41 @@ impl TradingBotSystem {
             self.message_bus.clone(),
         );
 
+        println!("DEBUG: Spawning market actor");
         let market_ref = crate::actors::spawn_actor(market_actor, "market".to_string()).await?;
         self.market_actor_ref = Some(market_ref.clone());
+        println!("DEBUG: Market actor spawned");
 
-        // Create the strategy actor
+        // Create and start the strategy actor
+        println!("DEBUG: Creating strategy actor");
+        info!("Creating strategy actor...");
         let strategy_actor = StrategyActor::new(
             token_repo.clone(),
-            strategy,
+            strategy.clone(),
             self.message_bus.clone(),
-            self.config.clone(),
         );
+        println!("DEBUG: Spawning strategy actor");
         let strategy_ref =
             crate::actors::spawn_actor(strategy_actor, "strategy".to_string()).await?;
         self.strategy_actor_ref = Some(strategy_ref.clone());
+        println!("DEBUG: Strategy actor spawned");
 
-        // Create the risk manager actor
-        let risk_config = &self.config.trading;
-        let risk_actor = RiskManagerActor::new(
-            token_repo.clone(),
-            pos_repo.clone(),
-            self.message_bus.clone(),
-            risk_config.max_position_size,
-            risk_config.stop_loss,
-            risk_config.take_profit,
-            self.config.clone(),
-        );
-        let risk_ref = crate::actors::spawn_actor(risk_actor, "risk".to_string()).await?;
-        self.risk_actor_ref = Some(risk_ref.clone());
-
-        // Create the execution actor
-        let dex_client = if self.config.trading.paper_trading {
-            // Always use paper trading client if paper trading is enabled, regardless of testnet setting
-            info!("Paper trading enabled, using paper trading DEX client");
-            DexClient::new_paper_trading()
-        } else if self.config.dex.testnet {
-            // Only use testnet client when paper trading is false but testnet is true
-            info!("Testnet trading enabled, using testnet DEX client");
-            DexClient::new_testnet(&self.config)?
+        println!("DEBUG: Creating execution actor");
+        // Create the execution actor first, as its ref is needed by RiskManagerActor
+        let dex_client = if self.config.dex.is_testnet() || self.config.trading.paper_trading {
+            info!(
+                "Creating DEX client for Testnet/Paper (network={:?}, paper_trading={})",
+                self.config.dex.network, self.config.trading.paper_trading
+            );
+            if self.config.dex.is_testnet() && !self.config.trading.paper_trading {
+                DexClient::new_ethereum(&self.config, self.message_bus.clone())?
+            } else {
+                // Paper trading
+                DexClient::new_paper_trading(&self.config)?
+            }
         } else {
-            // Live trading
-            info!("Live trading enabled, using live DEX client");
-            DexClient::new_live()
+            info!("Creating DEX client for Live trading");
+            DexClient::new_ethereum(&self.config, self.message_bus.clone())?
         };
         let execution_actor = ExecutionActor::new(
             token_repo.clone(),
@@ -1006,10 +925,27 @@ impl TradingBotSystem {
             self.message_bus.clone(),
             self.config.clone(),
         );
+        println!("DEBUG: Spawning execution actor");
         let execution_ref =
             crate::actors::spawn_actor(execution_actor, "execution".to_string()).await?;
         self.execution_actor_ref = Some(execution_ref.clone());
+        println!("DEBUG: Execution actor spawned");
 
+        println!("DEBUG: Creating risk actor");
+        // Create the risk manager actor, passing the execution_actor_ref
+        let risk_actor = RiskManagerActor::new(
+            token_repo.clone(),
+            pos_repo.clone(),
+            self.message_bus.clone(),
+            self.config.clone(),
+            execution_ref.clone(),
+        );
+        println!("DEBUG: Spawning risk actor");
+        let risk_ref = crate::actors::spawn_actor(risk_actor, "risk".to_string()).await?;
+        self.risk_actor_ref = Some(risk_ref.clone());
+        println!("DEBUG: Risk actor spawned");
+
+        println!("DEBUG: Creating database actor");
         // Create the database actor
         // Pass the repo_factory directly
         let database_actor = DatabaseActor::new(
@@ -1017,10 +953,13 @@ impl TradingBotSystem {
             self.message_bus.clone(),
             self.config.clone(),
         );
+        println!("DEBUG: Spawning database actor");
         let database_ref =
             crate::actors::spawn_actor(database_actor, "database".to_string()).await?;
         self.database_actor_ref = Some(database_ref.clone());
+        println!("DEBUG: Database actor spawned");
 
+        println!("DEBUG: Registering actors with supervisor");
         // Register all actors with the supervisor
         if let Some(supervisor) = &self.supervisor {
             debug!("Registering actors with supervisor...");
@@ -1060,13 +999,17 @@ impl TradingBotSystem {
                 debug!("Database actor registered with supervisor");
             }
 
+            println!("DEBUG: Starting all actors through supervisor");
             // Start all actors through the supervisor
             debug!("Starting all actors through supervisor...");
             supervisor.start_all_actors().await?;
+            println!("DEBUG: All actors started through supervisor");
 
+            println!("DEBUG: Starting actor health monitoring");
             // Start health monitoring through supervisor
             debug!("Starting actor health monitoring...");
             supervisor.watch_actors().await?;
+            println!("DEBUG: Actor health monitoring started");
 
             // Database maintenance is now handled directly by the database actor
             debug!("Database actor will handle its own maintenance");
@@ -1077,16 +1020,19 @@ impl TradingBotSystem {
             return Err(Error::Internal("Failed to create supervisor".to_string()));
         }
 
+        println!("DEBUG: Waiting for actors to initialize");
         // A small delay to ensure all actors are fully initialized
         tokio::time::sleep(Duration::from_millis(100)).await;
 
+        println!("DEBUG: Setting up event subscriptions");
         // Set up event subscriptions after all actors are started
         self.setup_event_subscriptions().await?;
+        println!("DEBUG: Event subscriptions set up");
 
         // Mark the system as running
         self.running = true;
+        println!("DEBUG: start_actor_system() completed successfully");
 
-        info!("Actor system started successfully");
         Ok(())
     }
 

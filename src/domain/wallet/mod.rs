@@ -1,1 +1,1 @@
-// Wallet management domain logic 
+// Wallet management domain logic

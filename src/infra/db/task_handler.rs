@@ -1,22 +1,18 @@
 use crate::core::error::{Error, Result};
 use crate::infra::db::queue::{PositionUpdateOperation, TradeOperation};
 use crate::infra::db::queue::{PositionUpdateQueue, TradeOperationQueue};
+use crate::infra::db::repositories::position::RecordCloseArgs;
 use crate::infra::db::repositories::{PositionRepository, TokenRepository, TradeRepository};
 use crate::infra::db::Database;
 use log::{debug, error, info, warn};
 use std::sync::Arc;
 use tokio;
-use tokio::task::JoinError;
+// use tokio::task::JoinError;
 
 /// Handler for database operations that should be run in a blocking context
 /// This struct contains only synchronous methods for database operations
 /// that will be executed on a blocking thread pool
 pub struct DatabaseTaskHandler;
-
-// Helper function to convert JoinError
-fn convert_join_error(e: JoinError) -> Error {
-    Error::Task(format!("Blocking task failed: {}", e))
-}
 
 impl DatabaseTaskHandler {
     /// Process a batch of position updates from the queue (Now requires PositionRepository)
@@ -137,7 +133,7 @@ impl DatabaseTaskHandler {
 
         // Process each trade operation
         for operation in batch {
-            let token_id = operation.token_id.clone();
+            let token_id = operation.canonical_token_id.clone();
             // Call the async version
             if let Err(e) = Self::process_single_trade_operation(
                 &trade_repo,
@@ -204,12 +200,14 @@ impl DatabaseTaskHandler {
                 if let Err(e) = position_repo
                     .record_position_close_with_trade(
                         position_id,
-                        token_id,
-                        trade_op.price,
-                        trade_op.size,
-                        entry_price,
-                        entry_time,
-                        trade_op.timestamp,
+                        RecordCloseArgs {
+                            token_id,
+                            exit_price: trade_op.price,
+                            size: trade_op.size,
+                            entry_price,
+                            entry_time,
+                            exit_time: trade_op.timestamp,
+                        },
                     )
                     .await
                 {
@@ -245,15 +243,12 @@ impl DatabaseTaskHandler {
             (false, None) => {
                 debug!(
                     "Processing standalone trade for {} at price ${:.4}",
-                    token_id, trade_op.price
+                    trade_op.canonical_token_id, trade_op.price
                 );
-                // Need provider_id for record_trade - where does it come from? Assume token_id for now.
-                // TODO: Determine source for provider_id in standalone trades.
-                let provider_id = token_id;
                 if let Err(e) = trade_repo
                     .record_trade(
-                        token_id,
-                        provider_id,
+                        &trade_op.canonical_token_id,
+                        &trade_op.provider_token_id,
                         trade_op.price,
                         trade_op.size,
                         trade_op.is_buy,
@@ -261,7 +256,10 @@ impl DatabaseTaskHandler {
                     )
                     .await
                 {
-                    error!("Failed to record standalone trade for {}: {}", token_id, e);
+                    error!(
+                        "Failed to record standalone trade for {}: {}",
+                        trade_op.canonical_token_id, e
+                    );
                     if let Err(mark_err) = queue.mark_failed(trade_op, &e.to_string()) {
                         error!("Failed to mark trade as failed: {}", mark_err);
                     }

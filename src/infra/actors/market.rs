@@ -8,18 +8,19 @@ use crate::infra::api::market::{MarketDataEvent, MarketDataProvider};
 use crate::infra::db::database::TokenMetadata;
 use crate::infra::db::repositories::CachingRepository;
 use crate::infra::db::repositories::TokenRepository;
-use async_trait::async_trait;
-use chrono::Utc;
 use log::{debug, error, info, trace, warn};
 use serde_json;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicU64, Ordering},
     Arc, Mutex,
 };
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, RwLock};
-use tokio::task::JoinHandle;
 use tokio::time::interval;
+
+// Type alias for the collection task handle
+pub type MarketDataCollectionTaskHandle =
+    Arc<RwLock<Option<tokio::task::JoinHandle<Result<(), Error>>>>>;
 
 pub struct MarketDataActor {
     market_api: Box<dyn MarketDataProvider + Send + Sync>,
@@ -31,7 +32,7 @@ pub struct MarketDataActor {
     tokens_to_track: Vec<String>,
     wide_scan_mode: bool,
     ws_receiver: Option<mpsc::Receiver<MarketDataEvent>>,
-    collection_task: Arc<RwLock<Option<tokio::task::JoinHandle<Result<(), Error>>>>>,
+    collection_task: MarketDataCollectionTaskHandle,
     config: Arc<Config>,
     last_activity: Arc<Mutex<Instant>>,
     last_scan_duration: Arc<Mutex<Option<Duration>>>,
@@ -84,10 +85,6 @@ impl MarketDataActor {
     pub fn with_message_bus(mut self, bus: Arc<MessageBus>) -> Self {
         self.message_bus = bus;
         self
-    }
-
-    fn should_track_token(&self, symbol: &str) -> bool {
-        self.tokens_to_track.is_empty() || self.tokens_to_track.contains(&symbol.to_lowercase())
     }
 
     async fn handle_market_data(&mut self, data_result: Result<Vec<TokenMetrics>, Error>) {
@@ -175,7 +172,6 @@ impl MarketDataActor {
                 let bus_clone = self.message_bus.clone();
 
                 let db_store_closure = {
-                    let repo = token_repo_clone.clone();
                     let tid = token_id_clone.clone();
                     let price_db = price;
                     let vol_db = vol;
@@ -274,6 +270,12 @@ impl MarketDataActor {
         let mut poll_count = 0;
 
         while self.running {
+            // Check global shutdown flag
+            if crate::domain::trading::execution::bot::is_forced_shutdown() {
+                info!("MarketDataActor: Global shutdown detected, exiting polling loop");
+                break;
+            }
+
             trace!("MarketDataActor: Waiting for next polling interval");
             interval_timer.tick().await;
             if !self.running {
@@ -312,13 +314,19 @@ impl MarketDataActor {
             provider_name
         );
 
-        let mut connection_attempts = 0;
+        let mut _connection_attempts = 0;
         let max_connection_attempts = 5;
-        let mut ws_sender_for_connection: Option<mpsc::Sender<MarketDataEvent>> = None;
+        let mut _ws_sender_for_connection: Option<mpsc::Sender<MarketDataEvent>> = None;
 
         while self.running {
-            connection_attempts += 1;
-            if connection_attempts > max_connection_attempts {
+            // Check global shutdown flag
+            if crate::domain::trading::execution::bot::is_forced_shutdown() {
+                info!("MarketDataActor: Global shutdown detected, exiting websocket loop");
+                break;
+            }
+
+            _connection_attempts += 1;
+            if _connection_attempts > max_connection_attempts {
                 error!(
                     "Failed to connect to WebSocket after {} attempts. Falling back to polling.",
                     max_connection_attempts
@@ -329,34 +337,34 @@ impl MarketDataActor {
 
             let (ws_sender, ws_receiver) = mpsc::channel::<MarketDataEvent>(256); // Increased buffer
             self.ws_receiver = Some(ws_receiver);
-            ws_sender_for_connection = Some(ws_sender.clone()); // Keep sender for connection attempt
+            _ws_sender_for_connection = Some(ws_sender.clone()); // Keep sender for connection attempt
 
             match self
                 .market_api
                 .connect_websocket(
                     self.tokens_to_track.clone(),
-                    ws_sender_for_connection.unwrap(), // Safe due to Some above
+                    _ws_sender_for_connection.unwrap(), // Safe due to Some above
                 )
                 .await
             {
                 Ok(_) => {
                     info!(
                         "Successfully connected to [{}] WebSocket on attempt {}",
-                        provider_name, connection_attempts
+                        provider_name, _connection_attempts
                     );
-                    connection_attempts = 0; // Reset for future reconnections within this session
+                    _connection_attempts = 0; // Reset for future reconnections within this session
                     break; // Proceed to event loop
                 }
                 Err(e) => {
                     warn!(
                         "WebSocket connection attempt {} to [{}] failed: {}",
-                        connection_attempts, provider_name, e
+                        _connection_attempts, provider_name, e
                     );
                     self.ws_receiver = None; // Clear receiver as connection failed
                     if !self.running {
                         return Ok(());
                     }
-                    let backoff_secs = 1 << (connection_attempts - 1); // 1, 2, 4, 8, 16
+                    let backoff_secs = 1 << (_connection_attempts - 1); // 1, 2, 4, 8, 16
                     info!("Retrying WebSocket connection in {}s...", backoff_secs);
                     tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
                     if !self.running {
@@ -383,6 +391,12 @@ impl MarketDataActor {
             Duration::from_secs(std::cmp::max(600, self.scan_interval * 2)); // e.g., 10 min
 
         while self.running {
+            // Check global shutdown flag
+            if crate::domain::trading::execution::bot::is_forced_shutdown() {
+                info!("MarketDataActor: Global shutdown detected, exiting websocket loop");
+                break;
+            }
+
             if let Some(current_ws_receiver) = &mut self.ws_receiver {
                 tokio::select! {
                     biased; // Prioritize WS events
@@ -480,6 +494,17 @@ impl MarketDataActor {
         self.ws_receiver = None; // Ensure it's cleared
         Ok(())
     }
+
+    async fn log_initial_paper_stablecoin_balance(&self) {
+        if self.config.trading.paper_trading {
+            let symbol = &self.config.dex.paper_simulated_stablecoin_symbol;
+            let balance = self.config.dex.paper_simulated_stablecoin_balance;
+            info!(
+                "💰 Initial PAPER TRADING stablecoin balance: {:.2} {}",
+                balance, symbol
+            );
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -488,13 +513,19 @@ impl Actor for MarketDataActor {
         async move {
             info!("MarketDataActor starting...");
             self.running = true;
+            // The main data collection loop is now started via Command::Start
+            // in handle_message to allow for provider selection at runtime if needed.
             Ok(())
         }
     }
 
     fn stop(&mut self) -> Result<(), Error> {
         info!("MarketDataActor stopping...");
-        self.running = false;
+        self.running = false; // Signal tasks to stop
+
+        // The actual stopping of the collection_task (if any) is handled
+        // in Message::Command(Command::Stop) to correctly manage the JoinHandle.
+        // WebSocket disconnection is also handled there or by the task itself.
         Ok(())
     }
 
@@ -502,9 +533,11 @@ impl Actor for MarketDataActor {
         &mut self,
         msg: Message,
     ) -> impl std::future::Future<Output = Result<(), Error>> + Send {
+        let mut self_clone = self.clone(); // Clone for the main async block
+
         async move {
-            *self.last_activity.lock().unwrap() = Instant::now();
-            let current_status = get_actor_status(self);
+            *self_clone.last_activity.lock().unwrap() = Instant::now();
+            let current_status = get_actor_status(&self_clone); // Use cloned self
 
             match msg {
                 Message::Event(event) => match event {
@@ -519,7 +552,7 @@ impl Actor for MarketDataActor {
                                 token_id,
                                 price,
                                 volume,
-                                change_24h: None,
+                                change_24h: None, // Placeholder, real value should be calculated or fetched
                                 timestamp,
                             }),
                             MarketEvent::VolumeUpdate {
@@ -532,15 +565,31 @@ impl Actor for MarketDataActor {
                                 timestamp,
                             }),
                             MarketEvent::MarketDataError(err_msg) => Err(Error::Api(err_msg)),
-                            _ => Err(Error::NotImplemented(
-                                "Unhandled MarketEvent variant".to_string(),
-                            )),
+                            MarketEvent::NewTokenDiscovered { .. } => {
+                                trace!("MarketDataActor ignoring NewTokenDiscovered, handled by other systems like DB directly.");
+                                return Ok(()); // Early exit for this specific event if no action needed here
+                            }
+                            MarketEvent::MarketAnomalyDetected { .. } => {
+                                trace!("MarketDataActor ignoring MarketAnomalyDetected, handled by RiskManager.");
+                                return Ok(());
+                            }
+                            MarketEvent::StatusCheck => {
+                                trace!("MarketDataActor received StatusCheck event.");
+                                return Ok(());
+                            }
+                            MarketEvent::SupervisorRecoveryRequest(_) => {
+                                trace!("MarketDataActor received SupervisorRecoveryRequest event.");
+                                return Ok(());
+                            }
                         };
 
                         match md_event_result {
                             Ok(md_event) => {
-                                self.total_events_processed.fetch_add(1, Ordering::Relaxed);
-                                if let Err(e) = self.handle_market_data_event(md_event).await {
+                                self_clone
+                                    .total_events_processed
+                                    .fetch_add(1, Ordering::Relaxed);
+                                if let Err(e) = self_clone.handle_market_data_event(md_event).await
+                                {
                                     error!("Error handling market data event: {}", e);
                                 }
                             }
@@ -554,10 +603,11 @@ impl Actor for MarketDataActor {
                         let _ = responder.send(Ok(QueryResult::Status(current_status)));
                     }
                     Query::GetMetrics => {
-                        let metrics = get_actor_metrics(self).await;
+                        let metrics = get_actor_metrics(&self_clone).await; // Pass cloned self
                         let _ = responder.send(Ok(QueryResult::Metrics(metrics)));
                     }
                     Query::GetMaintenanceStatus => {
+                        // Market actor doesn't perform DB maintenance
                         let _ = responder.send(Ok(QueryResult::Status(
                             "Market actor does not perform DB maintenance".to_string(),
                         )));
@@ -567,89 +617,103 @@ impl Actor for MarketDataActor {
                 Message::Command(cmd) => match cmd {
                     Command::Start => {
                         info!("MarketDataActor received Start command");
-                        if self.collection_task.read().await.is_some() {
+                        if self_clone.collection_task.read().await.is_some() {
                             warn!("MarketDataActor Start command received, but collection task is already running.");
                             return Ok(());
                         }
-                        self.start().await?; // Sets self.running = true
+                        self_clone.running = true; // Set running before spawning task
 
-                        let mut actor_clone_for_task = self.clone();
+                        let mut actor_clone_for_task = self_clone.clone(); // Further clone for the task
                         let collection_handle = tokio::spawn(async move {
                             info!(
                                 "Market data collection task started for provider: {}",
                                 actor_clone_for_task.market_api.name()
                             );
+                            actor_clone_for_task
+                                .log_initial_paper_stablecoin_balance()
+                                .await;
+
                             let mut backoff_secs = 1;
                             let max_backoff_secs = 60;
 
-                            while actor_clone_for_task.running {
-                                if let Err(e) = actor_clone_for_task.start_market_data_loop().await
-                                {
-                                    error!(
-                                        "Market data loop error: {}. Will retry in {}s",
-                                        e, backoff_secs
-                                    );
-                                    if !actor_clone_for_task.running {
-                                        info!("Actor stopped during error handling, exiting collection task.");
-                                        break;
-                                    }
-                                    tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
-                                    backoff_secs =
-                                        std::cmp::min(backoff_secs * 2, max_backoff_secs);
-                                } else {
-                                    // If loop exited cleanly but actor still supposed to be running (e.g. WS disconnect then reconnect failed)
-                                    if actor_clone_for_task.running {
-                                        warn!("Market data loop exited. Actor still running, attempting restart of loop after short delay.");
-                                        backoff_secs = 1; // Reset backoff
-                                        tokio::time::sleep(Duration::from_secs(5)).await;
-                                    // Brief pause before restarting loop
-                                    } else {
-                                        info!("Market data loop exited because actor is no longer running.");
-                                        break;
-                                    }
-                                }
+                            let loop_result: Result<(), Error> = loop {
                                 if !actor_clone_for_task.running {
-                                    // Final check
-                                    info!("Actor no longer running, exiting collection task.");
-                                    break;
+                                    info!("Actor stopped, exiting collection task normally.");
+                                    break Ok(());
                                 }
-                            }
+
+                                match actor_clone_for_task.start_market_data_loop().await {
+                                    Ok(_) => {
+                                        // Loop exited cleanly but actor still running, indicates potential issue or need to restart loop.
+                                        if actor_clone_for_task.running {
+                                            warn!("Market data loop exited cleanly but actor still running. Restarting loop after delay.");
+                                            backoff_secs = 1; // Reset backoff
+                                            tokio::time::sleep(Duration::from_secs(5)).await;
+                                            // Continue the loop
+                                        } else {
+                                            info!("Market data loop exited because actor is no longer running.");
+                                            break Ok(());
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!(
+                                            "Market data loop error: {}. Will retry in {}s",
+                                            e, backoff_secs
+                                        );
+                                        if !actor_clone_for_task.running {
+                                            info!("Actor stopped during error handling, exiting collection task with error: {}", e);
+                                            break Err(e); // Propagate the error
+                                        }
+                                        tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                                        backoff_secs =
+                                            std::cmp::min(backoff_secs * 2, max_backoff_secs);
+                                        // Continue the loop for retrying
+                                    }
+                                }
+                            };
+
                             info!(
-                                "Market data collection task finished for provider: {}",
-                                actor_clone_for_task.market_api.name()
+                                "Market data collection task finished for provider: {}. Result: {:?}",
+                                actor_clone_for_task.market_api.name(),
+                                loop_result
                             );
-                            Ok(())
+                            loop_result // This is the Result<(), Error> for the JoinHandle
                         });
-                        *self.collection_task.write().await = Some(collection_handle);
+                        *self_clone.collection_task.write().await = Some(collection_handle);
                         info!("MarketDataActor data collection task scheduled.");
                     }
                     Command::Stop => {
                         info!("MarketDataActor received Stop command");
-                        self.stop()?; // Sets self.running = false
+                        self_clone.running = false; // Set running to false first
 
-                        if let Some(handle) = self.collection_task.write().await.take() {
-                            info!("Aborting market data collection task...");
-                            handle.abort();
-                            match handle.await {
-                                Ok(_) => info!("Market data collection task aborted successfully."),
-                                Err(e) if e.is_cancelled() => info!(
-                                    "Market data collection task abortion confirmed (cancelled)."
-                                ),
-                                Err(e) => error!("Error awaiting aborted task: {}", e),
-                            }
+                        if let Some(handle) = self_clone.collection_task.write().await.take() {
+                            info!("Signalling market data collection task to stop...");
+                            // The task should observe self.running and exit gracefully.
+                            // We can also abort as a fallback if graceful shutdown is too slow.
+                            // For now, rely on self.running and JoinHandle.await with a timeout.
+                            tokio::spawn(async move {
+                                match tokio::time::timeout(Duration::from_secs(10), handle).await {
+                                    Ok(Ok(_)) => {
+                                        info!("Market data collection task joined successfully.")
+                                    }
+                                    Ok(Err(e)) => {
+                                        error!("Market data collection task panicked: {:?}", e)
+                                    }
+                                    Err(_) => {
+                                        error!(
+                                            "Market data collection task join timed out. Aborting."
+                                        );
+                                        // Abort is not available on the JoinHandle directly after it's awaited/timed out.
+                                        // If the task handle was stored in an Arc<Mutex<Option<JoinHandle>>>, one could abort it before await.
+                                        // For now, the task should self-terminate based on `running` flag.
+                                    }
+                                }
+                            });
                         } else {
                             info!("No active market data collection task to stop.");
                         }
-
-                        // Disconnect WebSocket if it was used by this instance
-                        if self.market_api.supports_websocket() {
-                            // Check if provider supports it
-                            // The disconnect is now handled at the end of start_websocket_loop
-                            // to ensure it's called by the task that owns the connection.
-                            // However, if the task was aborted abruptly, we might want a fallback.
-                            // For now, rely on the task's own cleanup.
-                            info!("WebSocket disconnect is handled by the collection task upon its termination.");
-                        }
+                        // WebSocket disconnect is handled by the collection task's loop end
+                        info!("WebSocket disconnect will be handled by the collection task upon its termination.");
                     }
                     _ => warn!("Received unhandled Command: {:?}", cmd),
                 },

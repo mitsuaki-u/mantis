@@ -1,8 +1,12 @@
+pub mod dex_transaction_log;
 pub mod position;
 pub mod token;
 pub mod trade;
 
+pub use dex_transaction_log::DexTransactionLogRepository;
+pub use position::CompletedPosition;
 pub use position::PositionRepository;
+pub use position::RecordCloseArgs;
 pub use token::TokenRepository;
 pub use trade::TradeRepository;
 
@@ -10,7 +14,6 @@ use crate::core::config::Config;
 use crate::core::error::Result;
 use crate::infra::cache::Cache;
 use crate::infra::db::Database;
-use async_trait::async_trait;
 use std::future::Future;
 use std::sync::Arc;
 
@@ -104,6 +107,11 @@ impl RepositoryFactory {
             self.db.clone(),
             self.config.trading.paper_trading,
         ))
+    }
+
+    /// Get the DexTransactionLog repository
+    pub fn dex_transaction_log_repository(&self) -> DexTransactionLogRepository {
+        DexTransactionLogRepository::new(Arc::new(self.db.clone()))
     }
 
     /// Get a clone of the underlying database connection pool provider

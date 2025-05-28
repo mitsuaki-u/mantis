@@ -33,4 +33,4 @@ pub struct TokenTransfer {
     pub from: String,
     pub to: String,
     pub value: String,
-} 
+}

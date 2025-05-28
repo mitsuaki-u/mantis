@@ -1,5 +1,5 @@
 use chrono::Local;
-use log::{Level, LevelFilter, Log, Metadata, Record, SetLoggerError};
+use log::{LevelFilter, Log, Metadata, Record, SetLoggerError};
 use serde_json::json;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};

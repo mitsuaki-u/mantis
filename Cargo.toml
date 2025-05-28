@@ -12,11 +12,12 @@ path = "src/lib.rs"
 name = "honeybadger"
 path = "src/bin/honeybadger.rs"
 
+
 [dependencies]
 clap = { version = "4.4", features = ["derive"] }
-reqwest = { version = "0.11", features = ["json"] }
-tokio = { version = "1.0", features = ["full", "signal"] }
-serde_json = { version = "1.0", features = ["preserve_order"] }
+reqwest = { version = "0.12.4", features = ["json", "rustls-tls"], default-features = false }
+tokio = { version = "1", features = ["full"] }
+serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 env_logger = "0.10"
@@ -27,8 +28,8 @@ http = "0.2"
 notify = "6.1"
 notify-rust = "4.9"
 tokio-stream = "0.1"
-uuid = { version = "1.4", features = ["v4", "fast-rng"] }
-futures = "0.3"
+uuid = { version = "1.3", features = ["v4", "serde"] }
+futures = "0.3.30"
 indicatif = "0.17"
 unicode-truncate = "0.2"
 once_cell = "1.18"
@@ -36,13 +37,12 @@ directories = "5.0"
 tabled = "0.18"
 dirs = "5.0.1"
 thiserror = "1.0"
-async-trait = "0.1"
+async-trait = "0.1.77"
 lazy_static = "1.4.0"
-rand = "0.8"
+rand = "0.8.5"
 tokio-tungstenite = "0.21.0"
 futures-util = "0.3.30"
-ethers = { version = "2.0", features = ["ws", "rustls"] }
-hex = "0.4"
+hex = "0.4.3"
 anyhow = "1.0"
 redis = { version = "0.25", features = ["tokio-comp"] }
 prettytable-rs = "0.10.0"
@@ -52,4 +52,15 @@ dashmap = "5.5"
 # Added PostgreSQL dependencies
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
 deadpool-postgres = { version = "0.12", features = ["rt_tokio_1"] }
+
+ethers = { version = "2.0", features = ["ws", "rustls", "legacy", "abigen"] }
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[build-dependencies]
+# ... existing build dependencies ...
+
+[dev-dependencies]
+# ... existing dev dependencies ...
 

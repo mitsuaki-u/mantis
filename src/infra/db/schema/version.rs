@@ -3,9 +3,9 @@
 //! This module handles tracking the database schema version,
 //! allowing for orderly migrations and upgrades.
 
-use crate::core::error::{Error, Result};
+use crate::core::error::Result;
 // use rusqlite::{Connection, params, ToSql, Transaction};
-use log::{debug, error, info, warn};
+use log::warn;
 // use chrono::Utc;
 
 /// Schema version information

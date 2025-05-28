@@ -2,11 +2,12 @@ mod bus;
 pub use bus::MessageBus;
 
 use chrono::{DateTime, Utc};
-use log::{debug, error, info, trace, warn};
+use log::{debug, error, info, trace};
 use serde_json::Value;
-use std::sync::Arc;
-use std::sync::Once;
 use tokio::sync::{mpsc, oneshot};
+
+// Import domain types needed for events
+use crate::domain::dex::{TransactionPriority, TransactionStatus};
 
 /// Base trait for all actors in the system
 pub trait Actor: Send + Sync + 'static {
@@ -28,6 +29,7 @@ pub enum Event {
     Risk(RiskEvent),
     Execution(ExecutionEvent),
     Database(DatabaseEvent),
+    DexTransaction(DexTransactionEvent),
 }
 
 /// Market-related events
@@ -43,6 +45,21 @@ pub enum MarketEvent {
         token_id: String,
         volume: f64,
         timestamp: chrono::DateTime<chrono::Utc>,
+    },
+    NewTokenDiscovered {
+        token_id: String,
+        name: String,
+        symbol: String,
+        price: f64,
+        source: String,
+        timestamp: DateTime<Utc>,
+    },
+    MarketAnomalyDetected {
+        token_id: String,
+        anomaly_type: String,
+        description: String,
+        severity: String,
+        timestamp: DateTime<Utc>,
     },
     MarketDataError(String),
     StatusCheck,
@@ -72,11 +89,12 @@ pub enum RiskEvent {
         position_size: f64,
         timestamp: chrono::DateTime<chrono::Utc>,
     },
-    RiskLimitExceeded {
-        limit_type: String,
-        current: f64,
-        max: f64,
-        timestamp: chrono::DateTime<chrono::Utc>,
+    PositionOpened {
+        token_id: String,
+        position_id: String,
+        amount: f64,
+        price: f64,
+        timestamp: DateTime<Utc>,
     },
     PositionClosed {
         token_id: String,
@@ -87,6 +105,12 @@ pub enum RiskEvent {
         size: f64,
         entry_time: chrono::DateTime<chrono::Utc>,
         delete_position: bool,
+    },
+    RiskLimitExceeded {
+        limit_type: String,
+        current: f64,
+        max: f64,
+        timestamp: chrono::DateTime<chrono::Utc>,
     },
     RiskMetricsUpdate {
         daily_loss: f64,
@@ -99,17 +123,43 @@ pub enum RiskEvent {
         timestamp: chrono::DateTime<chrono::Utc>,
     },
     StatusCheck,
+    InsufficientFunds {
+        token_id: String,
+        current_balance_usd: f64,
+        required_balance_usd: f64,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    },
+    TradeSizeAdjusted {
+        token_id: String,
+        original_size_usd: f64,
+        adjusted_size_usd: f64,
+        reason: String,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    },
+    TradingHalted {
+        token_id: String,
+        reason: String,
+        timestamp: DateTime<Utc>,
+    },
 }
 
 /// Execution-related events
 #[derive(Debug, Clone)]
 pub enum ExecutionEvent {
     OrderExecuted {
-        token_id: String,
+        canonical_token_id: String,
+        provider_token_id: String,
         signal: crate::trading::strategy::Signal,
-        size: f64,
-        price: f64,
+        executed_value_usd: f64,
+        token_quantity: f64,
+        price_per_token: f64,
         timestamp: chrono::DateTime<chrono::Utc>,
+    },
+    OrderFailed {
+        token_id: String,
+        order_id: Option<String>,
+        reason: String,
+        timestamp: DateTime<Utc>,
     },
     PositionUpdate {
         token_id: String,
@@ -151,6 +201,31 @@ pub enum DatabaseEvent {
     StatusCheck,
 }
 
+/// DEX Transaction related events
+#[derive(Debug, Clone)]
+pub enum DexTransactionEvent {
+    Submitted {
+        tx_id: String,
+        submitted_details: Option<SubmittedTransactionInfo>,
+        submission_time: DateTime<Utc>,
+        priority: TransactionPriority,
+    },
+    StatusUpdated {
+        status: TransactionStatus,
+    },
+}
+
+/// Supporting struct for initial submission details
+#[derive(Debug, Clone)]
+pub struct SubmittedTransactionInfo {
+    pub from_token_address: String,
+    pub to_token_address: String,
+    pub amount_in_f64: f64,
+    pub slippage_tolerance: Option<f64>,
+    pub price_limit: Option<f64>,
+    pub dex_name: String,
+}
+
 /// Commands that can be sent to actors
 #[derive(Debug)]
 pub enum Command {
@@ -167,6 +242,7 @@ pub enum Query {
     GetStatus,
     GetMetrics,
     GetMaintenanceStatus,
+    GetNativeBalance,
 }
 
 /// Results that can be returned from queries
@@ -181,6 +257,7 @@ pub enum QueryResult {
     TradeHistory(Vec<crate::infra::db::repositories::trade::CompletedTrade>),
     TradingStats(crate::infra::db::repositories::trade::TradingStats),
     Success,
+    NativeBalance(f64),
 }
 
 /// Event types for subscription
@@ -191,6 +268,7 @@ pub enum EventType {
     Risk,
     Execution,
     Database,
+    DexTransaction,
 }
 
 /// Messages that can be sent to actors
@@ -255,6 +333,12 @@ pub async fn spawn_actor<A: Actor>(
 
         // Process messages as they arrive
         while let Some(msg) = receiver.recv().await {
+            // Check global shutdown flag
+            if crate::domain::trading::execution::bot::is_forced_shutdown() {
+                info!("Actor {}: Global shutdown detected, exiting", task_name);
+                break;
+            }
+
             trace!("Received message for actor {}: {:?}", task_name, msg);
 
             match actor.handle_message(msg).await {

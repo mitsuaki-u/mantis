@@ -1,36 +1,23 @@
-use chrono;
-use clap::{ArgAction, Parser};
-use env_logger;
+use clap::{ArgAction, Parser, Subcommand};
 use honeybadger::cli::commands::trading::{
-    analyze_market_data, close_position, display_open_positions, display_trading_history,
-    handle_analyze,
+    close_position, display_open_positions, display_trading_history, open_position,
 };
 use honeybadger::cli::commands::{
-    handle_config_command, handle_dex_command, handle_market_command, handle_trading_command,
-    handle_wallet_command, Commands as HoneyBadgerCommands, ConfigCommands, DexCommands,
-    MarketCommands, TradingArgs, WalletCommands,
+    handle_config_command, handle_dex_command, handle_trading_command, handle_wallet_command,
+    ConfigCommands, DexCommands, TradingArgs, WalletCommands,
 };
 use honeybadger::core::config::Config;
 use honeybadger::core::error::Error;
-use honeybadger::infra::actors::database::DatabaseActor;
-use honeybadger::infra::actors::{spawn_actor, Command, Message, MessageBus};
+use honeybadger::domain::trading::execution::bot::is_forced_shutdown;
+use honeybadger::infra::actors::MessageBus;
 use honeybadger::infra::cache::Cache;
-use honeybadger::infra::db::repositories::RepositoryFactory;
 use honeybadger::infra::db::repositories::TokenRepository;
 use honeybadger::infra::db::Database;
 use honeybadger::utils::logging;
 use log::{debug, error, info, warn};
-use std::collections::HashSet;
-use std::fs::File;
-use std::fs::OpenOptions;
 use std::io::{self, Write};
-use std::path::PathBuf;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 use std::time::Duration;
-use tokio;
 
 #[derive(Parser)]
 #[clap(name = "honeybadger")]
@@ -117,28 +104,20 @@ struct Cli {
     command: MainCommands,
 }
 
-#[derive(Parser)]
+#[derive(Subcommand)]
 enum MainCommands {
     /// Trading commands
     #[clap(subcommand)]
     Trading(TradingArgs),
-
-    /// Market data commands
-    #[clap(subcommand)]
-    Market(MarketCommands),
-
     /// DEX (Decentralized Exchange) commands
     #[clap(subcommand)]
     Dex(DexCommands),
-
     /// Wallet commands
     #[clap(subcommand)]
     Wallet(WalletCommands),
-
     /// Configuration commands
     #[clap(subcommand)]
     Config(ConfigCommands),
-
     /// Database management commands
     #[clap(subcommand)]
     Db(DbCommands),
@@ -166,98 +145,96 @@ enum DbCommands {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Error> {
-    let cli = Cli::parse();
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("DEBUG: Starting honeybadger main function");
 
-    // Initialize configuration
+    // Parse command line arguments first to get log settings
+    let args = Cli::parse();
+    println!("DEBUG: Args parsed");
+
+    // Load configuration
     let mut config = Config::load()?;
+    println!("DEBUG: Config loaded");
 
     // Apply command-line overrides to configuration
-    apply_cli_config(&mut config, &cli);
-
-    // Re-save config if changes were made (e.g., API keys)
-    // config.save()?;
+    apply_cli_config(&mut config, &args);
 
     // Initialize logging
     logging::init_logger(
-        cli.log_level.as_deref(),
-        cli.debug,
-        cli.log_file.as_deref(),
+        args.log_level.as_deref(),
+        args.debug,
+        args.log_file.as_deref(),
         &config.logs.directory,
         "honeybadger", // Use app name as command name for now
-        cli.log_modules.as_deref(),
+        args.log_modules.as_deref(),
     )
     .map_err(|e| Error::Config(format!("Logger initialization failed: {}", e)))?;
+    println!("DEBUG: Logging initialized");
+
+    // Initialize database
+    println!("DEBUG: Initializing database...");
+    let db = init_database(&config).await?;
+    println!("DEBUG: Database initialized");
+
+    // Create token repository for cache
+    let token_repo_for_cache = Arc::new(TokenRepository::new(
+        db.clone(),
+        config.trading.paper_trading,
+    ));
+
+    // Initialize cache
+    println!("DEBUG: Initializing cache...");
+    let cache = init_cache(&config, token_repo_for_cache).await;
+    println!("DEBUG: Cache initialized");
+
+    // Start cache flush task if enabled
+    if cache.is_some() {
+        println!("DEBUG: Cache is available");
+    }
 
     info!("Honeybadger CLI started");
     info!("Version: {}", env!("CARGO_PKG_VERSION"));
     debug!("Configuration loaded: {:#?}", config);
 
+    println!("DEBUG: About to initialize MessageBus");
     // --- Asynchronous Initializations ---
-    let db = init_database(&config).await?;
-    info!("Database connection pool initialized.");
-
-    let token_repo_for_cache = Arc::new(TokenRepository::new(
-        db.clone(),
-        config.trading.paper_trading,
-    ));
-    let cache = init_cache(&config, &db, token_repo_for_cache).await;
-    if cache.is_some() {
-        info!("Redis cache initialized.");
-    }
-
     let message_bus = if matches!(
-        cli.command,
+        args.command,
         MainCommands::Trading(TradingArgs::Start { .. })
             | MainCommands::Trading(TradingArgs::Status)
             | MainCommands::Trading(TradingArgs::Health)
             | MainCommands::Trading(TradingArgs::Restart { .. })
             | MainCommands::Trading(TradingArgs::Stop)
+            | MainCommands::Wallet(_)
     ) {
+        println!("DEBUG: Creating MessageBus instance");
         Some(MessageBus::instance())
     } else {
+        println!("DEBUG: Skipping MessageBus creation");
         None
     };
+    println!("DEBUG: MessageBus initialization completed");
+
+    println!("DEBUG: About to handle commands");
 
     // Handle commands
-    match cli.command {
+    match args.command {
         MainCommands::Trading(args) => {
             if matches!(
                 args,
                 TradingArgs::History { .. }
                     | TradingArgs::Positions { .. }
-                    | TradingArgs::Analyze { .. }
                     | TradingArgs::Close { .. }
+                    | TradingArgs::Open { .. }
             ) {
                 match args {
                     TradingArgs::History { limit, paper, live } => {
                         let is_paper = if live { false } else { paper };
-                        display_trading_history(&db, is_paper, limit).await?
+                        display_trading_history(&db, is_paper, limit).await?;
                     }
                     TradingArgs::Positions { paper, live } => {
                         let is_paper = if live { false } else { paper };
-                        display_open_positions(&db, is_paper).await?
-                    }
-                    TradingArgs::Analyze {
-                        strategy,
-                        confidence_threshold,
-                        min_volume,
-                        stop_loss,
-                        debug,
-                        risk_tolerance,
-                        testing_mode,
-                    } => {
-                        handle_analyze(
-                            &db,
-                            &strategy,
-                            confidence_threshold,
-                            min_volume,
-                            stop_loss,
-                            debug,
-                            risk_tolerance,
-                            Some(&testing_mode),
-                        )
-                        .await?
+                        display_open_positions(&db, is_paper).await?;
                     }
                     TradingArgs::Close {
                         token,
@@ -266,25 +243,43 @@ async fn main() -> Result<(), Error> {
                         live,
                     } => {
                         let is_paper = if live { false } else { paper };
-                        close_position(&db, &token, Some(price), is_paper).await?
+                        close_position(&db, &token, Some(price), is_paper).await?;
+                    }
+                    TradingArgs::Open {
+                        token,
+                        amount,
+                        price,
+                        paper,
+                        live,
+                    } => {
+                        let is_paper = if live { false } else { paper };
+                        open_position(&db, &token, price, amount, is_paper).await?;
                     }
                     _ => unreachable!(),
                 }
+            } else if let Some(bus) = message_bus {
+                handle_trading_command(args, config.clone(), db.clone(), bus.clone()).await?;
             } else {
-                if let Some(bus) = message_bus {
-                    handle_trading_command(args, config, db, bus).await?
-                } else {
-                    return Err(Error::Config(
-                        "MessageBus not initialized for real-time trading command.".to_string(),
-                    ));
-                }
+                return Err(Error::Config(
+                    "MessageBus not initialized for this trading command. This typically means the command is run standalone without full actor system.".to_string(),
+                ).into());
             }
         }
-        MainCommands::Market(command) => handle_market_command(command).await?,
-        MainCommands::Dex(command) => handle_dex_command(command).await?,
-        MainCommands::Wallet(command) => handle_wallet_command(command).await?,
+        MainCommands::Dex(command) => {
+            handle_dex_command(command).await?;
+        }
+        MainCommands::Wallet(command) => {
+            if let Some(bus) = message_bus {
+                handle_wallet_command(command, config.clone(), bus).await?;
+            } else {
+                return Err(Error::Config(
+                    "MessageBus not initialized for wallet command.".to_string(),
+                )
+                .into());
+            }
+        }
         MainCommands::Config(command) => handle_config_command(command).await?,
-        MainCommands::Db(command) => handle_db_command(command, config, db).await?,
+        MainCommands::Db(command) => handle_db_command(command, config.clone(), db.clone()).await?,
     }
 
     Ok(())
@@ -366,11 +361,7 @@ async fn init_database(config: &Config) -> Result<Database, Error> {
 }
 
 /// Initialize the Redis cache connection pool (async)
-async fn init_cache(
-    config: &Config,
-    db: &Database,
-    token_repo: Arc<TokenRepository>,
-) -> Option<Cache> {
+async fn init_cache(config: &Config, token_repo: Arc<TokenRepository>) -> Option<Cache> {
     if !config.cache.enabled {
         info!("Redis cache is disabled in configuration.");
         return None;
@@ -401,7 +392,6 @@ async fn init_cache(
     info!("✅ Redis cache initialized successfully.");
     let cache_clone = Arc::new(cache.clone());
     let flush_interval_secs = config.cache.flush_interval;
-    let db_clone_for_task = db.clone();
 
     tokio::spawn(async move {
         info!(
@@ -410,12 +400,26 @@ async fn init_cache(
         );
         let mut interval = tokio::time::interval(Duration::from_secs(flush_interval_secs));
         loop {
+            // Check global shutdown flag first
+            if is_forced_shutdown() {
+                info!("Cache flush task: Global shutdown detected, exiting");
+                break;
+            }
+
             interval.tick().await;
+
+            // Check again after tick in case shutdown happened during wait
+            if is_forced_shutdown() {
+                info!("Cache flush task: Global shutdown detected after tick, exiting");
+                break;
+            }
+
             debug!("Running periodic cache flush...");
-            if let Err(e) = cache_clone.manual_flush(&db_clone_for_task).await {
+            if let Err(e) = cache_clone.manual_flush().await {
                 error!("Error during background cache flush: {}", e);
             }
         }
+        info!("Cache flush task terminated gracefully");
     });
     Some(cache)
 }
@@ -446,7 +450,7 @@ async fn handle_db_command(command: DbCommands, config: Config, db: Database) ->
             warn!("Database schema display needs reimplementation for PostgreSQL.");
             // TODO: Implement schema fetching from PostgreSQL information_schema
             println!("Schema display not yet implemented for PostgreSQL.");
-            if let Some(path) = output {
+            if let Some(_path) = output {
                 println!("Cannot write schema to file: Feature not implemented.");
             }
         }

@@ -1,6 +1,6 @@
-use serde::{Deserialize, Serialize};
 use crate::core::models::news::NewsItem;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenMetrics {
@@ -8,14 +8,14 @@ pub struct TokenMetrics {
     pub id: String,
     pub symbol: String,
     pub name: String,
-    
+
     // Price and market data
     pub price_usd: f64,
     pub price_change_24h: f64,
     pub volume_24h: f64,
     pub market_cap: f64,
     pub market_cap_rank: Option<usize>,
-    
+
     // Additional metadata
     pub latest_news: Option<NewsItem>,
     pub chain: Option<String>,
@@ -46,4 +46,4 @@ pub struct TrendingToken {
     pub price_usd: f64,
     pub price_change_24h: f64,
     pub volume_24h: Option<f64>,
-} 
+}

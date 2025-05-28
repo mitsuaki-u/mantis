@@ -3,7 +3,6 @@ use crate::core::error::{Error, Result};
 use clap::{ArgAction, Subcommand};
 use colored::*;
 use serde_json;
-use std::path::PathBuf;
 
 #[derive(Subcommand)]
 pub enum ConfigCommands {
@@ -355,7 +354,7 @@ pub async fn handle_config_command(command: ConfigCommands) -> Result<()> {
             // Split the key into parts
             let parts: Vec<&str> = key.split('.').collect();
 
-            if parts.len() < 1 || parts.len() > 3 {
+            if parts.is_empty() || parts.len() > 3 {
                 return Err(Error::Config(format!("Invalid configuration key: {}", key)));
             }
 
@@ -502,7 +501,7 @@ pub async fn handle_config_command(command: ConfigCommands) -> Result<()> {
             // Split the key into parts
             let parts: Vec<&str> = key.split('.').collect();
 
-            if parts.len() < 1 || parts.len() > 3 {
+            if parts.is_empty() || parts.len() > 3 {
                 return Err(Error::Config(format!("Invalid configuration key: {}", key)));
             }
 

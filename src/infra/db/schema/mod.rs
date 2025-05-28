@@ -10,10 +10,10 @@
 // use rusqlite::Result as RusqliteResult;
 use crate::core::error::{Error, Result};
 use log::{debug, error, info, warn}; // Add error and warn
-use tokio_postgres::{Client as PgClient, Error as PgError}; // Use PgClient
-                                                            // Remove unused imports
-                                                            // use std::collections::HashSet;
-                                                            // use crate::infra::db::queries;
+use tokio_postgres::Client as PgClient; // Use PgClient
+                                        // Remove unused imports
+                                        // use std::collections::HashSet;
+                                        // use crate::infra::db::queries;
 
 // Submodules
 pub mod tables;
@@ -143,20 +143,17 @@ pub async fn initialize_schema(client: &mut PgClient) -> Result<()> {
                             "Object in DDL for alter {} likely already exists, rolling back to savepoint {}: {}",
                             def.name, savepoint_name, e
                         );
-                        if let Err(rollback_err) = transaction
+                        if let Err(e) = transaction
                             .execute(
                                 format!("ROLLBACK TO SAVEPOINT {};", savepoint_name).as_str(),
                                 &[],
                             )
                             .await
                         {
-                            error!(
-                                "Failed to rollback to savepoint {}: {}",
-                                savepoint_name, rollback_err
-                            );
+                            error!("Failed to rollback to savepoint {}: {}", savepoint_name, e);
                             return Err(Error::Database(format!(
                                 "Failed to rollback to savepoint {}: {}",
-                                savepoint_name, rollback_err
+                                savepoint_name, e
                             )));
                         }
                         // Also release the savepoint after rolling back to it, to clean it up.
@@ -170,8 +167,8 @@ pub async fn initialize_schema(client: &mut PgClient) -> Result<()> {
                             .await
                         {
                             warn!(
-                                "Failed to release savepoint {} after rollback, continuing...",
-                                savepoint_name
+                                "Failed to release savepoint {} after rollback: {}, continuing...",
+                                savepoint_name, e
                             );
                         }
                     } else {

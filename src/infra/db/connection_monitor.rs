@@ -1,5 +1,5 @@
 use crate::infra::db::Database;
-use log::{debug, error, info, trace, warn};
+use log::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -25,8 +25,6 @@ pub struct ConnectionStats {
 
 /// For tracking and monitoring database connections
 pub struct ConnectionMonitor {
-    /// The database being monitored
-    db: Arc<Database>,
     /// Connection statistics
     stats: Arc<Mutex<ConnectionStats>>,
     /// Active connections and their acquisition times
@@ -37,9 +35,8 @@ pub struct ConnectionMonitor {
 
 impl ConnectionMonitor {
     /// Create a new connection monitor
-    pub fn new(db: Arc<Database>, enabled: bool) -> Self {
+    pub fn new(enabled: bool) -> Self {
         Self {
-            db,
             stats: Arc::new(Mutex::new(ConnectionStats {
                 active_connections: 0,
                 connection_requests: 0,
@@ -246,21 +243,14 @@ impl ConnectionMonitor {
 
         issues
     }
-
-    /// Check if the database connection is healthy
-    async fn is_healthy(&self) -> bool {
-        match self.db.check_pool_health().await {
-            (true, _) => true,
-            (false, message) => {
-                error!("Database connection unhealthy: {}", message);
-                false
-            }
-        }
-    }
 }
 
-/// Initialize the connection monitor with the database
-pub fn initialize_connection_monitor(db: Arc<Database>) -> Arc<ConnectionMonitor> {
-    let monitor = ConnectionMonitor::new(db, true);
+/// Initialize connection monitoring utilities for the provided database.
+///
+/// This creates a new `ConnectionMonitor` instance and starts its monitoring loop.
+pub fn initialize_connection_monitor(_db: Arc<Database>) -> Arc<ConnectionMonitor> {
+    // Log that we're initializing (or re-initializing if called multiple times)
+    debug!("Initializing database connection monitor...");
+    let monitor = ConnectionMonitor::new(true);
     Arc::new(monitor)
 }

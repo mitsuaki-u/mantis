@@ -1,5 +1,5 @@
-pub mod retry;
 pub mod logging;
+pub mod retry;
 
-pub use retry::{with_retry, is_retriable_error, get_retry_backoff};
-pub use logging::{init_logger, log_and_default, log_error, generate_operation_id}; 
+pub use logging::{generate_operation_id, init_logger, log_and_default, log_error};
+pub use retry::{get_retry_backoff, is_retriable_error, with_retry};

@@ -1,32 +1,28 @@
-use crate::core::config::Config;
 use crate::core::error::{Error, Result};
-use crate::core::models::token::TokenData;
 // Use full paths from database module
-use crate::infra::db::database::{PriceData, TokenMetadata};
+use crate::infra::db::database::TokenMetadata;
 use crate::infra::db::repositories::TokenRepository;
 use chrono::{DateTime, Utc};
 use deadpool_redis::{
     Config as RedisConfig, Connection, Pool as RedisPool, Runtime as RedisRuntime,
 };
-use log::{debug, error, info, trace, warn};
+use log::{debug, error, info, warn};
 use redis::{AsyncCommands, RedisResult}; // Add Value for pipeline results
 use serde::{Deserialize, Serialize};
 use serde_json;
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
 
 // Cache TTL values in seconds
 const TOKEN_METADATA_TTL: usize = 3600; // 1 hour
 const PRICE_DATA_TTL: usize = 60; // 1 minute
-const TOKEN_LIST_TTL: usize = 60 * 5; // 5 minutes
 
 // Define the pool type using the import
 // type RedisPool = RedisPool; // Removed redundant type alias
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct CachedTokenMetadata {
+pub struct CachedTokenMetadata {
     name: String,
     symbol: String,
     decimals: i32,
@@ -43,9 +39,6 @@ pub struct CachedPrice {
 pub struct Cache {
     pool: Option<RedisPool>,
     prefix: String,
-    flush_priority_set: String, // Redis set key for tokens needing priority flush
-    last_flush_attempt: Arc<Mutex<Option<std::time::Instant>>>,
-    flush_in_progress: Arc<RwLock<bool>>,
     batch_interval: Duration,
     enabled: bool,
     token_repo: Option<Arc<TokenRepository>>,
@@ -56,7 +49,6 @@ impl Cache {
         let mut enabled = false;
         let mut pool = None;
         let batch_interval = Duration::from_secs(batch_interval_secs);
-        let mut final_url = redis_url.to_string(); // Store the URL used
 
         let mut cfg = RedisConfig::from_url(redis_url);
 
@@ -94,7 +86,6 @@ impl Cache {
                 "Initial Redis connection failed. Trying fallback URL: {}",
                 ip_url
             );
-            final_url = ip_url.clone(); // Update final URL for logging
             cfg = RedisConfig::from_url(&ip_url);
             match cfg.create_pool(Some(RedisRuntime::Tokio1)) {
                 Ok(p) => match p.get().await {
@@ -120,9 +111,6 @@ impl Cache {
         Self {
             pool,
             prefix: String::new(),
-            flush_priority_set: String::new(),
-            last_flush_attempt: Arc::new(Mutex::new(None)),
-            flush_in_progress: Arc::new(RwLock::new(false)),
             batch_interval,
             enabled,
             token_repo: None,
@@ -154,7 +142,7 @@ impl Cache {
         }
     }
 
-    pub async fn start_flush_task(self, db: crate::db::Database) -> Result<()> {
+    pub async fn start_flush_task(self) -> Result<()> {
         if !self.enabled || self.pool.is_none() {
             info!("Cache is disabled or pool not initialized, not starting flush task");
             return Ok(());
@@ -171,13 +159,27 @@ impl Cache {
             let mut interval = tokio::time::interval(cache_clone.batch_interval);
 
             loop {
+                // Check global shutdown flag first
+                if crate::domain::trading::execution::bot::is_forced_shutdown() {
+                    info!("Cache flush task: Global shutdown detected, exiting");
+                    break;
+                }
+
                 interval.tick().await;
+
+                // Check again after tick in case shutdown happened during wait
+                if crate::domain::trading::execution::bot::is_forced_shutdown() {
+                    info!("Cache flush task: Global shutdown detected after tick, exiting");
+                    break;
+                }
+
                 debug!("Running scheduled cache flush");
 
-                if let Err(e) = cache_clone.flush_to_database(&db).await {
+                if let Err(e) = cache_clone.flush_to_database().await {
                     error!("Error flushing cache to database: {}", e);
                 }
             }
+            info!("Cache flush task terminated gracefully");
         });
 
         Ok(())
@@ -217,7 +219,8 @@ impl Cache {
 
         let mut conn = self.get_connection().await?;
 
-        conn.set_ex(&key, serialized, TOKEN_METADATA_TTL as u64)
+        let _: () = conn
+            .set_ex(&key, serialized, TOKEN_METADATA_TTL as u64)
             .await
             .map_err(|e| Error::Cache(format!("Redis SETEX error: {}", e)))?;
 
@@ -278,7 +281,8 @@ impl Cache {
             serde_json::to_string(&price_data).map_err(|e| Error::Serialization(e.to_string()))?;
 
         let mut conn = self.get_connection().await?;
-        conn.set_ex(&key, serialized, PRICE_DATA_TTL as u64)
+        let _: () = conn
+            .set_ex(&key, serialized, PRICE_DATA_TTL as u64)
             .await
             .map_err(|e| Error::Cache(format!("Redis SETEX error: {}", e)))?;
 
@@ -326,8 +330,9 @@ impl Cache {
         }
     }
 
-    async fn flush_to_database(&self, db: &crate::db::Database) -> Result<()> {
-        if !self.enabled {
+    async fn flush_to_database(&self) -> Result<()> {
+        if !self.is_enabled() || self.token_repo.is_none() {
+            debug!("Cache or TokenRepository not available, skipping flush to database.");
             return Ok(());
         }
 
@@ -364,7 +369,7 @@ impl Cache {
 
         // Use a local block for the batch operation
         let mut price_updates: Vec<(String, f64, f64)> = Vec::new();
-        let mut metadata_updates: HashMap<String, String> = HashMap::new();
+        let _metadata_updates: HashMap<String, String> = HashMap::new();
         let mut keys_to_clear: Vec<String> = Vec::new();
 
         for token_id in &all_tokens {
@@ -374,23 +379,14 @@ impl Cache {
             keys_to_clear.push(metadata_key.clone());
 
             let price_result: RedisResult<Option<String>> = conn.get(&price_key).await;
-            let metadata_result: RedisResult<Option<String>> = conn.get(&metadata_key).await;
 
             let price_data_opt: Option<CachedPrice> = price_result
                 .ok()
                 .flatten()
                 .and_then(|s| serde_json::from_str(&s).ok());
-            let metadata_opt: Option<CachedTokenMetadata> = metadata_result
-                .ok()
-                .flatten()
-                .and_then(|s| serde_json::from_str(&s).ok());
 
             if let Some(price_data) = price_data_opt {
-                let symbol = metadata_opt
-                    .map(|m| m.symbol)
-                    .unwrap_or_else(|| token_id.to_string());
                 price_updates.push((token_id.clone(), price_data.price, price_data.price));
-                // Use update_token_metadata_with_price which handles both
             } else {
                 warn!(
                     "No price data found in cache for token {} during flush.",
@@ -405,10 +401,29 @@ impl Cache {
             // Assuming TokenRepository has a method like batch_update_token_data
             // Or call update_token_metadata_with_price for each
             for (token_id, price, volume) in price_updates {
+                // Re-fetch metadata_opt for this specific token_id to use in the call
+                // This is a bit inefficient but ensures we have the correct metadata for the token_id
+                // from the price_updates list. A better way would be to store metadata along with price_updates.
+                let metadata_key = format!("token:metadata:{}", token_id);
+                let metadata_result: RedisResult<Option<String>> = conn.get(&metadata_key).await;
+                let current_metadata_opt: Option<CachedTokenMetadata> = metadata_result
+                    .ok()
+                    .flatten()
+                    .and_then(|s| serde_json::from_str(&s).ok());
+
+                let (symbol_to_use, name_to_use) = match current_metadata_opt {
+                    Some(meta) => (meta.symbol, meta.name),
+                    None => (token_id.clone(), token_id.clone()), // Fallback to token_id
+                };
+
                 // Call the async function directly
                 if let Err(e) = token_repo
                     .update_token_metadata_with_price(
-                        &token_id, &token_id, &token_id, price, volume,
+                        &token_id,
+                        &symbol_to_use,
+                        &name_to_use,
+                        price,
+                        volume,
                     )
                     .await
                 {
@@ -455,9 +470,9 @@ impl Cache {
         Ok(())
     }
 
-    pub async fn manual_flush(&self, db: &crate::db::Database) -> Result<()> {
+    pub async fn manual_flush(&self) -> Result<()> {
         info!("Performing manual cache flush");
-        self.flush_to_database(db).await
+        self.flush_to_database().await
     }
 
     pub async fn prioritize_token_flush(&self, token_id: &str) -> Result<()> {
@@ -551,12 +566,9 @@ impl Cache {
         Ok(result_map)
     }
 
-    pub async fn preload_common_data(
-        &self,
-        db: &crate::db::Database,
-        token_ids: &[String],
-    ) -> Result<()> {
-        if !self.enabled {
+    pub async fn preload_common_data(&self, token_ids: &[String]) -> Result<()> {
+        if !self.is_enabled() || self.token_repo.is_none() {
+            debug!("Cache or TokenRepository not available, skipping preload.");
             return Ok(());
         }
 
@@ -670,15 +682,17 @@ impl Cache {
             return Ok(()); // Silently ignore if cache is disabled
         }
         let mut conn = self.get_connection().await?;
-        let value = serde_json::to_string(value)?;
+        let serialized_value = serde_json::to_string(value).map_err(Error::from)?;
         let key = format!("{}:{}", self.prefix, key);
 
         if let Some(ttl) = ttl_seconds {
-            conn.set_ex(&key, value, ttl as u64)
+            let _: () = conn
+                .set_ex(&key, serialized_value, ttl as u64)
                 .await
                 .map_err(|e| Error::Cache(format!("Redis SETEX error for key {}: {}", key, e)))?;
         } else {
-            conn.set(&key, value)
+            let _: () = conn
+                .set(&key, serialized_value)
                 .await
                 .map_err(|e| Error::Cache(format!("Redis SET error for key {}: {}", key, e)))?;
         }

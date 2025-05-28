@@ -19,4 +19,4 @@ pub struct DexStats {
     pub volume_24h: f64,
     pub total_liquidity: f64,
     pub pair_count: usize,
-} 
+}

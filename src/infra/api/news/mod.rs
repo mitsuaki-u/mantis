@@ -1,25 +1,28 @@
 use crate::core::error::Error;
 use crate::core::models::news::NewsItem;
+use chrono::DateTime;
 use log::{debug, error};
 use reqwest::Client;
 use serde_json::Value;
-use chrono::DateTime;
 
 const BASE_URL: &str = "https://min-api.cryptocompare.com/data/v2";
 
 pub async fn get_token_news(token_id: &str, symbol: &str) -> Result<Option<NewsItem>, Error> {
     debug!("Fetching news for {} ({})", symbol, token_id);
-    
+
     let config = crate::config::Config::load()?;
-    let api_key = config.api_keys.cryptocompare
+    let api_key = config
+        .api_keys
+        .cryptocompare
         .as_ref()
         .ok_or_else(|| Error::Config("CryptoCompare API key not set".to_string()))?;
 
     let url = format!("{}/news/", BASE_URL);
     debug!("CryptoCompare URL: {}", url);
-    
+
     let client = Client::new();
-    let response = client.get(&url)
+    let response = client
+        .get(&url)
         .header("authorization", format!("Apikey {}", api_key))
         .query(&[
             ("lang", "EN"),
@@ -51,7 +54,8 @@ fn parse_news_response(data: Value) -> Result<Option<NewsItem>, Error> {
                 published_at: DateTime::from_timestamp(
                     latest["published_on"].as_i64().unwrap_or_default(),
                     0,
-                ).unwrap_or_default(),
+                )
+                .unwrap_or_default(),
                 categories: latest["categories"]
                     .as_str()
                     .unwrap_or_default()
@@ -63,4 +67,4 @@ fn parse_news_response(data: Value) -> Result<Option<NewsItem>, Error> {
     }
 
     Ok(None)
-} 
+}

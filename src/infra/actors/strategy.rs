@@ -1,18 +1,15 @@
-use super::{Actor, DatabaseEvent, ExecutionEvent, Message, RiskEvent};
-use crate::core::config::Config;
-use crate::core::error::Error;
+use super::{Actor, Message};
+use crate::core::error::{Error, Result};
 use crate::core::models::market::TokenMetrics;
-use crate::domain::trading::strategy::{Position, Signal, Strategy};
+use crate::domain::trading::strategy::MomentumStrategy;
+use crate::domain::trading::strategy::{Signal, Strategy};
 use crate::infra::actors::MessageBus;
 use crate::infra::actors::{Command, Event, MarketEvent, Query, QueryResult, StrategyEvent};
 use crate::infra::db::repositories::TokenRepository;
-use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use log::{debug, error, info, trace, warn};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
 use tokio::sync::Semaphore;
 
 // Define a constant for the default concurrency limit
@@ -23,9 +20,7 @@ pub struct StrategyActor {
     strategy: Strategy,
     token_repo: Arc<TokenRepository>,
     message_bus: Arc<MessageBus>,
-    config: Arc<Config>,
     running: bool,
-    last_signal_time: Option<chrono::DateTime<chrono::Utc>>,
     db_concurrency_limiter: Arc<Semaphore>,
 }
 
@@ -34,7 +29,6 @@ impl StrategyActor {
         token_repo: Arc<TokenRepository>,
         strategy: Strategy,
         message_bus: Arc<MessageBus>,
-        config: Arc<Config>,
     ) -> Self {
         // Limit concurrent DB operations originating from strategy processing
         // Use a hardcoded default for now, as config field doesn't exist
@@ -50,8 +44,6 @@ impl StrategyActor {
             message_bus,
             strategy,
             running: false,
-            config,
-            last_signal_time: None,
             db_concurrency_limiter: Arc::new(Semaphore::new(db_concurrency_limit)),
         }
     }
@@ -79,8 +71,9 @@ impl StrategyActor {
     }
 }
 
+#[async_trait::async_trait]
 impl Actor for StrategyActor {
-    fn start(&mut self) -> impl std::future::Future<Output = Result<(), Error>> + Send {
+    fn start(&mut self) -> impl std::future::Future<Output = Result<()>> + Send {
         async move {
             self.running = true;
             info!(
@@ -91,23 +84,22 @@ impl Actor for StrategyActor {
             debug!(
                 "📝 Strategy will analyze market data and generate signals for applicable tokens"
             );
-
             Ok(())
         }
     }
 
-    fn stop(&mut self) -> Result<(), Error> {
+    fn stop(&mut self) -> Result<()> {
         self.running = false;
-        info!("⏹️ Stopping StrategyActor");
-        debug!("StrategyActor: Stopped processing market events");
+        info!("⏹️ StrategyActor stopped");
         Ok(())
     }
 
-    /// Handle incoming messages
     fn handle_message(
         &mut self,
         msg: Message,
-    ) -> impl std::future::Future<Output = Result<(), Error>> + Send {
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        let mut self_clone = self.clone(); // Clone for the async block
+
         async move {
             trace!("📨 StrategyActor received message: {:?}", msg);
 
@@ -120,28 +112,26 @@ impl Actor for StrategyActor {
                                 token_id,
                                 price,
                                 volume,
-                                timestamp: _,
+                                timestamp: _, // timestamp from event might not be used directly if db provides fresher
                             } => {
-                                if !self.running {
+                                if !self_clone.running {
                                     trace!("🛑 StrategyActor ignoring price update - not running");
                                     return Ok(());
                                 }
 
-                                // Clone needed data BEFORE spawning task
                                 let token_id_clone = token_id.clone();
                                 let price_clone = price;
                                 let volume_clone = volume;
-                                let limiter = self.db_concurrency_limiter.clone();
-                                let mut this = self.clone();
+                                let limiter = self_clone.db_concurrency_limiter.clone();
+                                let mut strategy_instance_clone = self_clone.clone(); // Further clone for the task
 
-                                // Log the token ID received from the event
                                 debug!(
-                                    "EVENT RECEIVED: Price update for token_id: '{}', price: {:.4}",
+                                    "EVENT RECEIVED: Price update for token_id: '{}', price: ${:.4}",
                                     token_id, price
                                 );
 
                                 tokio::spawn(async move {
-                                    let permit = match limiter.acquire().await {
+                                    let _permit = match limiter.acquire().await {
                                         Ok(p) => p,
                                         Err(_) => {
                                             error!("TASK FAILED (Semaphore Closed): Could not acquire DB permit for {}. Task aborted.", token_id_clone);
@@ -150,7 +140,6 @@ impl Actor for StrategyActor {
                                     };
 
                                     let task_start_time = std::time::Instant::now();
-                                    // Log the token ID being processed by this specific task
                                     debug!(
                                         "TASK SPAWNED: Strategy price update for '{}': ${:.4}",
                                         token_id_clone, price_clone
@@ -161,7 +150,9 @@ impl Actor for StrategyActor {
 
                                     let token_data_result = tokio::time::timeout(
                                         db_timeout,
-                                        this.token_repo.get_token_price_stats(&token_id_clone),
+                                        strategy_instance_clone
+                                            .token_repo
+                                            .get_token_price_stats(&token_id_clone),
                                     )
                                     .await;
 
@@ -172,51 +163,45 @@ impl Actor for StrategyActor {
                                                 token_id_clone,
                                                 db_call_start_time.elapsed()
                                             );
-                                            // Log the fetched TokenData
                                             debug!(
                                                 "TASK DB DATA for '{}': {:?}",
                                                 token_id_clone, data
                                             );
                                             let mut updated_data = data;
-                                            // Ensure the price/volume from the triggering event are used if newer
-                                            // (DB data might be slightly stale)
                                             updated_data.price_usd = price_clone;
                                             if let Some(vol) = volume_clone {
                                                 updated_data.volume_24h = vol;
                                             }
-                                            updated_data.last_updated = Some(Utc::now()); // Update timestamp
+                                            updated_data.last_updated = Some(Utc::now());
                                             updated_data
                                         }
                                         Ok(Err(e)) => {
                                             error!(
-                                                    "TASK FAILED (DB Error): Error getting token metadata for '{}': {:?}. DB call took: {:?}, Total Elapsed: {:?}",
-                                                    token_id_clone, e, db_call_start_time.elapsed(), task_start_time.elapsed()
-                                                );
-                                            return; // Permit dropped implicitly
+                                                "TASK FAILED (DB Error): Error getting token metadata for '{}': {:?}. DB call took: {:?}, Total Elapsed: {:?}",
+                                                token_id_clone, e, db_call_start_time.elapsed(), task_start_time.elapsed()
+                                            );
+                                            return;
                                         }
                                         Err(_) => {
                                             error!(
-                                                    "TASK TIMEOUT (DB Read): Timeout getting token metadata for '{}' after {:?}. Total Elapsed: {:?}",
-                                                    token_id_clone, db_timeout, task_start_time.elapsed()
-                                                );
-                                            return; // Permit dropped implicitly
+                                                "TASK TIMEOUT (DB Read): Timeout getting token metadata for '{}' after {:?}. Total Elapsed: {:?}",
+                                                token_id_clone, db_timeout, task_start_time.elapsed()
+                                            );
+                                            return;
                                         }
                                     };
 
-                                    // Convert TokenData to TokenMetrics
                                     let token_metrics =
                                         crate::types::market::TokenMetrics::from(&token_data);
-                                    // Log the resulting TokenMetrics
                                     debug!(
                                         "TASK METRICS for '{}': {:?}",
                                         token_id_clone, token_metrics
                                     );
 
-                                    // Skip tokens with invalid prices (redundant check?)
                                     if token_metrics.price_usd <= 0.0 {
-                                        debug!("⚠️ TASK SKIPPED (Invalid Price): Skipping signal analysis for '{}' - invalid price: ${:.4}. Elapsed: {:?}", 
-                                               token_id_clone, token_metrics.price_usd, task_start_time.elapsed());
-                                        return; // Permit dropped implicitly
+                                        debug!("⚠️ TASK SKIPPED (Invalid Price): Skipping signal analysis for '{}' - invalid price: ${:.4}. Elapsed: {:?}",
+                                            token_id_clone, token_metrics.price_usd, task_start_time.elapsed());
+                                        return;
                                     }
 
                                     let analysis_timeout = Duration::from_secs(10);
@@ -228,21 +213,20 @@ impl Actor for StrategyActor {
 
                                     let analysis_result = tokio::time::timeout(analysis_timeout, async {
                                         debug!("  TASK: -> update_market_data for {}", token_id_clone);
-                                        this.strategy.update_market_data(&token_metrics);
+                                        strategy_instance_clone.strategy.update_market_data(&token_metrics);
                                         debug!("  TASK: <- update_market_data finished for {}. Calling analyze_for_entry...", token_id_clone);
-                                        let should_enter = this.strategy.analyze_for_entry(&token_metrics);
+                                        let should_enter = strategy_instance_clone.strategy.analyze_for_entry(&token_metrics);
                                         debug!("  TASK: <- analyze_for_entry finished for {}. Result: {}", token_id_clone, should_enter);
                                         should_enter
                                     }).await;
 
                                     match analysis_result {
                                         Ok(should_enter) => {
-                                            debug!("TASK: Strategy analysis completed for {}. Analysis took: {:?}. Should enter: {}", 
-                                                   token_id_clone, analysis_start_time.elapsed(), should_enter);
+                                            debug!("TASK: Strategy analysis completed for {}. Analysis took: {:?}. Should enter: {}",
+                                                token_id_clone, analysis_start_time.elapsed(), should_enter);
                                             if should_enter {
-                                                let confidence = this
+                                                let confidence = strategy_instance_clone
                                                     .calculate_signal_confidence(&token_metrics);
-
                                                 let event =
                                                     Event::Strategy(StrategyEvent::Signal {
                                                         token_id: token_id_clone.clone(),
@@ -250,31 +234,42 @@ impl Actor for StrategyActor {
                                                         confidence,
                                                         timestamp: Utc::now(),
                                                     });
-
                                                 debug!("TASK: Attempting to publish BUY signal for {}...", token_id_clone);
                                                 let publish_start_time = std::time::Instant::now();
-
-                                                if let Err(e) =
-                                                    this.message_bus.publish(event).await
+                                                if let Err(e) = strategy_instance_clone
+                                                    .message_bus
+                                                    .publish(event)
+                                                    .await
                                                 {
-                                                    error!("TASK ERROR (Publish Signal): Failed to publish entry signal for {}: {:?}. Publish took: {:?}, Total Elapsed: {:?}", 
-                                                           token_id_clone, e, publish_start_time.elapsed(), task_start_time.elapsed());
+                                                    error!("TASK ERROR (Publish Signal): Failed to publish entry signal for {}: {:?}. Publish took: {:?}, Total Elapsed: {:?}",
+                                                        token_id_clone, e, publish_start_time.elapsed(), task_start_time.elapsed());
                                                 } else {
-                                                    info!("✅ TASK SUCCESS (Buy Signal): Published BUY signal for {} with confidence {:.2}. Publish took: {:?}, Analysis took: {:?}, Total Elapsed: {:?}", 
-                                                          token_id_clone, confidence, publish_start_time.elapsed(), analysis_start_time.elapsed(), task_start_time.elapsed());
+                                                    info!("✅ TASK SUCCESS (Buy Signal): Published BUY signal for {} with confidence {:.2}. Publish took: {:?}, Analysis took: {:?}, Total Elapsed: {:?}",
+                                                        token_id_clone, confidence, publish_start_time.elapsed(), analysis_start_time.elapsed(), task_start_time.elapsed());
                                                 }
                                             } else {
-                                                debug!("TASK COMPLETED (No Signal): No entry signal for {}. Analysis took: {:?}, Total Elapsed: {:?}", 
-                                                           token_id_clone, analysis_start_time.elapsed(), task_start_time.elapsed());
+                                                debug!("TASK COMPLETED (No Signal): No entry signal for {}. Analysis took: {:?}, Total Elapsed: {:?}",
+                                                        token_id_clone, analysis_start_time.elapsed(), task_start_time.elapsed());
                                             }
                                         }
                                         Err(_) => {
-                                            error!("TASK TIMEOUT (Analysis): Strategy analysis timed out for token {} after {:?}. Total Elapsed: {:?}", 
-                                                   token_id_clone, analysis_timeout, task_start_time.elapsed());
+                                            error!("TASK TIMEOUT (Analysis): Strategy analysis timed out for token {} after {:?}. Total Elapsed: {:?}",
+                                                token_id_clone, analysis_timeout, task_start_time.elapsed());
                                         }
                                     }
+                                    // Permit is dropped when task finishes
                                 });
-
+                                Ok(())
+                            }
+                            MarketEvent::VolumeUpdate {
+                                token_id,
+                                volume,
+                                timestamp,
+                            } => {
+                                trace!(
+                                    "StrategyActor received VolumeUpdate for {}: Volume {}, Timestamp: {:?}. No action taken.",
+                                    token_id, volume, timestamp
+                                );
                                 Ok(())
                             }
                             MarketEvent::MarketDataError(e) => {
@@ -285,32 +280,61 @@ impl Actor for StrategyActor {
                                 trace!("📡 Received status check event in StrategyActor");
                                 Ok(())
                             }
-                            _ => {
-                                trace!("StrategyActor ignoring unhandled event type");
+                            MarketEvent::NewTokenDiscovered { .. } => {
+                                trace!("StrategyActor ignoring NewTokenDiscovered event.");
                                 Ok(())
+                            }
+                            MarketEvent::MarketAnomalyDetected { .. } => {
+                                trace!("StrategyActor ignoring MarketAnomalyDetected event.");
+                                Ok(())
+                            }
+                            MarketEvent::SupervisorRecoveryRequest(_) => {
+                                trace!("StrategyActor received SupervisorRecoveryRequest event.");
+                                return Ok(());
                             }
                         }
                     }
-                    _ => Ok(()),
+                    _ => Ok(()), // Ignore other event types
                 },
                 Message::Command(cmd) => match cmd {
                     Command::Start => {
-                        self.running = true;
+                        self_clone.running = true;
                         info!("▶️ StrategyActor started");
                         Ok(())
                     }
                     Command::Stop => {
-                        self.running = false;
+                        self_clone.running = false;
                         info!("⏹️ StrategyActor stopped");
                         Ok(())
                     }
-                    Command::UpdateConfig(config) => {
-                        debug!("🔧 Updating StrategyActor configuration");
-
-                        if let Some(threshold) = config.get("threshold").and_then(|v| v.as_f64()) {
-                            info!("🔄 Updated strategy threshold to {}", threshold);
+                    Command::UpdateConfig(new_config_json_value) => {
+                        debug!(
+                            "🔧 Updating StrategyActor configuration: {:?}",
+                            new_config_json_value
+                        );
+                        // Example: Update threshold if it exists in the config map
+                        if let Some(threshold_val_json) = new_config_json_value.get("threshold") {
+                            if let Some(parsed_threshold) = threshold_val_json.as_f64() {
+                                if let Some(momentum_strategy) = self_clone
+                                    .strategy
+                                    .inner_mut()
+                                    .as_any_mut()
+                                    .downcast_mut::<MomentumStrategy>()
+                                {
+                                    momentum_strategy.threshold = parsed_threshold;
+                                    info!("🔄 Updated strategy threshold to {}", parsed_threshold);
+                                } else {
+                                    warn!("Failed to downcast strategy to MomentumStrategy to update threshold.");
+                                }
+                            } else {
+                                warn!(
+                                    "Failed to parse 'threshold' as f64 from config: {:?}",
+                                    threshold_val_json
+                                );
+                            }
+                        } else {
+                            trace!("No 'threshold' update found in config for StrategyActor.");
                         }
-
                         Ok(())
                     }
                     Command::MaintenanceDb => {
@@ -323,29 +347,28 @@ impl Actor for StrategyActor {
                         debug!("StartMaintenanceScheduler command received by StrategyActor - no action needed");
                         Ok(())
                     }
-                    _ => {
-                        warn!("Unsupported command for StrategyActor");
-                        Ok(())
-                    }
                 },
                 Message::Query(query, responder) => match query {
                     Query::GetStatus => {
-                        let status = format!("StrategyActor running: {}", self.running);
+                        let status = format!("StrategyActor running: {}", self_clone.running);
                         responder
                             .send(Ok(QueryResult::Status(status)))
                             .map_err(|e| Error::Task(format!("Failed to send response: {:?}", e)))
                     }
                     Query::GetMetrics => {
                         let metrics = serde_json::json!({
-                            "running": self.running,
-                            "strategy": self.strategy.name(),
+                            "running": self_clone.running,
+                            "strategy": self_clone.strategy.name(),
+                            // Add other relevant metrics
                         });
                         responder
                             .send(Ok(QueryResult::Metrics(metrics)))
                             .map_err(|e| Error::Task(format!("Failed to send response: {:?}", e)))
                     }
                     _ => responder
-                        .send(Err(Error::Task("Unsupported query".to_string())))
+                        .send(Err(Error::Task(
+                            "Unsupported query for StrategyActor".to_string(),
+                        )))
                         .map_err(|e| {
                             Error::Task(format!("Failed to send error response: {:?}", e))
                         }),

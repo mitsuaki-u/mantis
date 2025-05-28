@@ -1,1 +1,1 @@
-// Market analysis domain logic 
+// Market analysis domain logic

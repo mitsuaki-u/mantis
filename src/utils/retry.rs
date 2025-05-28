@@ -1,15 +1,14 @@
-use std::future::Future;
-use std::time::Duration;
-use log::{warn, trace, info, debug};
 use crate::core::error::{Error, Result};
-use std::time::{SystemTime, UNIX_EPOCH};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
-use std::collections::HashMap;
+use log::{debug, trace, warn};
 use once_cell::sync::Lazy;
+use std::collections::HashMap;
+use std::future::Future;
+use std::sync::Mutex;
+use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 // Track retry frequencies to avoid log spam
-static RETRY_COUNTERS: Lazy<Mutex<HashMap<String, (usize, SystemTime)>>> = 
+static RETRY_COUNTERS: Lazy<Mutex<HashMap<String, (usize, SystemTime)>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 // How often to log repeated retries of the same operation (in seconds)
@@ -20,18 +19,18 @@ pub fn is_retriable_error(err: &Error) -> bool {
     match err {
         Error::Network(msg) => {
             // Network timeouts, connection resets are often transient
-            msg.contains("timed out") || 
-            msg.contains("connection reset") ||
-            msg.contains("connection refused")
-        },
+            msg.contains("timed out")
+                || msg.contains("connection reset")
+                || msg.contains("connection refused")
+        }
         Error::RateLimit(_) => true, // Rate limits are always retriable after some time
         Error::Database(db_err) => {
             // Some database errors are transient (locked, busy)
-            db_err.contains("database is locked") || 
-            db_err.contains("database is busy") || 
-            db_err.contains("unable to open database file") || 
-            db_err.contains("disk i/o error")
-        },
+            db_err.contains("database is locked")
+                || db_err.contains("database is busy")
+                || db_err.contains("unable to open database file")
+                || db_err.contains("disk i/o error")
+        }
         _ => false,
     }
 }
@@ -43,7 +42,7 @@ fn generate_jitter() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_else(|_| Duration::from_secs(0))
         .as_nanos() as u64;
-    
+
     // Use a simple modulo operation to get a value between 0-99
     now % 100
 }
@@ -57,14 +56,15 @@ pub fn get_retry_backoff(err: &Error, current_attempt: usize, base_backoff: Dura
                 .split("Retry after")
                 .nth(1)
                 .and_then(|s| s.trim().split(' ').next())
-                .and_then(|s| s.parse::<u64>().ok()) {
+                .and_then(|s| s.parse::<u64>().ok())
+            {
                 return Duration::from_secs(retry_after);
             }
-            
+
             // Default to exponential backoff with jitter
             let exp_backoff = base_backoff.as_millis() as u64 * (1 << current_attempt.min(6));
             Duration::from_millis(exp_backoff)
-        },
+        }
         _ => {
             // For other errors, use exponential backoff with a bit of jitter
             let exp_backoff = base_backoff.as_millis() as u64 * (1 << current_attempt.min(6));
@@ -80,7 +80,7 @@ fn should_log_retry(operation_name: &str, attempt: usize) -> bool {
     if attempt == 1 {
         return true;
     }
-    
+
     let now = SystemTime::now();
     let mut counters = match RETRY_COUNTERS.lock() {
         Ok(guard) => guard,
@@ -89,7 +89,7 @@ fn should_log_retry(operation_name: &str, attempt: usize) -> bool {
             return true;
         }
     };
-    
+
     // Check if we've seen this operation recently
     if let Some((last_attempt, last_time)) = counters.get(operation_name) {
         // If it's been a while since we logged this operation, log it again
@@ -99,13 +99,13 @@ fn should_log_retry(operation_name: &str, attempt: usize) -> bool {
                 return true;
             }
         }
-        
+
         // If the attempt number is significantly different, log it
         if *last_attempt > 0 && (attempt / 2) > *last_attempt {
             counters.insert(operation_name.to_string(), (attempt, now));
             return true;
         }
-        
+
         // Otherwise, don't log to avoid spam
         false
     } else {
@@ -127,50 +127,57 @@ where
     Fut: Future<Output = Result<T>>,
 {
     let mut attempt = 0;
-    
+
     loop {
         attempt += 1;
-        
+
         // Only log at trace level and only on the first attempt or periodically
         if attempt == 1 {
             trace!("Executing operation '{}'", operation_name);
         }
-            
+
         match f().await {
             Ok(result) => {
                 // Only log success after retries to reduce noise
                 if attempt > 1 {
-                    debug!("Operation '{}' succeeded after {} attempts", operation_name, attempt);
+                    debug!(
+                        "Operation '{}' succeeded after {} attempts",
+                        operation_name, attempt
+                    );
                 }
                 return Ok(result);
-            },
+            }
             Err(err) => {
                 if attempt > max_retries || !is_retriable_error(&err) {
                     // Only log final failures at warning level
                     if attempt > 1 {
-                        warn!("Operation '{}' failed after {} attempts: {}", 
-                            operation_name, attempt, err);
+                        warn!(
+                            "Operation '{}' failed after {} attempts: {}",
+                            operation_name, attempt, err
+                        );
                     }
                     return Err(if attempt > max_retries {
                         Error::RetryExhausted(format!(
-                            "Operation '{}' failed after {} attempts: {}", 
+                            "Operation '{}' failed after {} attempts: {}",
                             operation_name, attempt, err
                         ))
                     } else {
                         err
                     });
                 }
-                
+
                 let backoff = get_retry_backoff(&err, attempt, base_backoff);
-                
+
                 // Rate limit logging to avoid spamming logs
                 if should_log_retry(operation_name, attempt) {
-                    debug!("Attempt {} for '{}' failed: {}. Retrying in {:?}...", 
-                        attempt, operation_name, err, backoff);
+                    debug!(
+                        "Attempt {} for '{}' failed: {}. Retrying in {:?}...",
+                        attempt, operation_name, err, backoff
+                    );
                 }
-                    
+
                 tokio::time::sleep(backoff).await;
             }
         }
     }
-} 
+}

@@ -400,6 +400,12 @@ impl MarketDataProvider for BinanceProvider {
             let mut ws_stream_guard = ws_connection.write().await;
             if let Some(ws_stream) = ws_stream_guard.as_mut() {
                 while *is_connected.read().await {
+                    // Check global shutdown flag
+                    if crate::domain::trading::execution::bot::is_forced_shutdown() {
+                        info!("Binance WebSocket: Global shutdown detected, exiting");
+                        break;
+                    }
+
                     match ws_stream.next().await {
                         Some(Ok(msg)) => {
                             let provider = BinanceProvider::new(None, None);

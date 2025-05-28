@@ -35,22 +35,24 @@ struct DexScreenerVolume {
 
 pub async fn get_dex_pair(address: &str, chain: &str) -> Result<Vec<DexPair>, Error> {
     debug!("Fetching DEX pairs for {} on {}", address, chain);
-    
+
     let client = Client::new();
     let url = format!(
         "https://api.dexscreener.com/latest/dex/tokens/{},{}",
         address, chain
     );
     debug!("DexScreener URL: {}", url);
-    
+
     let response = client.get(&url).send().await?.error_for_status()?;
     let data = response.json::<DexScreenerResponse>().await?;
-    
+
     if data.pairs.is_empty() {
         return Err(Error::NotFound("No pairs found on DexScreener".to_string()));
     }
 
-    Ok(data.pairs.into_iter()
+    Ok(data
+        .pairs
+        .into_iter()
         .map(|pair| DexPair {
             token0: Token {
                 address: pair.base_token.address,
@@ -67,4 +69,4 @@ pub async fn get_dex_pair(address: &str, chain: &str) -> Result<Vec<DexPair>, Er
             liquidity: pair.liquidity,
         })
         .collect())
-} 
+}

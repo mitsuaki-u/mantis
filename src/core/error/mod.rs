@@ -1,7 +1,9 @@
 // use rusqlite; // Removed
+use ethers::prelude::*;
 use std::result;
 use std::sync::PoisonError;
 use thiserror::Error;
+// Added import
 use tokio_postgres::Error as PgError; // Added for PostgreSQL errors
 
 // Import our new logging utilities
@@ -20,6 +22,14 @@ pub enum Error {
     /// Data parsing errors
     #[error("Parse error: {0}")]
     Parse(String),
+
+    /// Data conversion errors (e.g., U256 to f64)
+    #[error("Conversion error: {0}")]
+    Conversion(String),
+
+    /// ABI encoding/decoding errors
+    #[error("ABI error: {0}")]
+    Abi(String),
 
     /// Resource not found
     #[error("Not found: {0}")]
@@ -74,7 +84,7 @@ pub enum Error {
     Internal(String),
 
     /// Feature not implemented
-    #[error("Feature not implemented: {0}")]
+    #[error("Not implemented: {0}")]
     NotImplemented(String),
 
     /// External third-party errors
@@ -108,6 +118,30 @@ pub enum Error {
     /// Cache operation errors
     #[error("Cache error: {0}")]
     Cache(String),
+
+    /// Errors related to DEX operations or connectivity
+    #[error("DEX error: {0}")]
+    Dex(String),
+
+    /// Error when a connection (e.g. to provider or wallet) is not established
+    #[error("Not connected: {0}")]
+    NotConnected(String),
+
+    /// Contract errors
+    #[error("Contract error: {0}")]
+    Contract(String),
+
+    /// Wallet connection and operation errors
+    #[error("Wallet error: {0}")]
+    Wallet(String),
+
+    /// Transaction execution errors
+    #[error("Transaction error: {0}")]
+    Transaction(String),
+
+    /// Input validation errors
+    #[error("Validation error: {0}")]
+    Validation(String),
 }
 
 // Convert from reqwest errors
@@ -166,10 +200,10 @@ impl From<&str> for Error {
     }
 }
 
-// Convert from any PoisonError for concurrency handling
+// Convert from mutex poison errors
 impl<T> From<PoisonError<T>> for Error {
     fn from(err: PoisonError<T>) -> Self {
-        Error::Concurrency(format!("Thread holding the lock panicked: {}", err))
+        Error::Concurrency(format!("Mutex poisoned: {}", err))
     }
 }
 
@@ -180,18 +214,38 @@ impl From<redis::RedisError> for Error {
     }
 }
 
-// Add From<tokio_postgres::Error> impl
+// Convert from postgres errors
 impl From<PgError> for Error {
     fn from(err: PgError) -> Self {
-        // TODO: Add specific error handling if needed (e.g., unique constraint violations)
-        Error::Database(err.to_string())
+        Error::Database(format!("PostgreSQL error: {}", err))
+    }
+}
+
+// Convert from ethers contract errors
+impl<T: Middleware> From<ContractError<T>> for Error {
+    fn from(err: ContractError<T>) -> Self {
+        Error::Contract(format!("Contract error: {}", err))
+    }
+}
+
+// Convert from ethers provider errors
+impl From<ProviderError> for Error {
+    fn from(err: ProviderError) -> Self {
+        Error::Network(format!("Provider error: {}", err))
+    }
+}
+
+// Convert from ethers ABI errors
+impl From<ethers::abi::Error> for Error {
+    fn from(err: ethers::abi::Error) -> Self {
+        Error::Abi(format!("ABI error: {}", err))
     }
 }
 
 // Convert from serde_json errors
 impl From<serde_json::Error> for Error {
     fn from(err: serde_json::Error) -> Self {
-        Error::Serialization(err.to_string())
+        Error::Serialization(format!("JSON error: {}", err))
     }
 }
 

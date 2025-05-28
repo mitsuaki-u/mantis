@@ -3,9 +3,6 @@
 //! This module contains the SQL definitions for all database tables,
 //! views, and indexes used in the application.
 
-use crate::core::error::Result;
-use log::{debug, error, info};
-
 /// A schema definition consisting of a name and SQL statement
 #[derive(Debug, Clone)]
 pub struct SchemaDefinition {

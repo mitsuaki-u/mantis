@@ -5,6 +5,6 @@ pub mod risk;
 pub mod strategy;
 
 // Re-export commonly used items
-pub use strategy::Strategy;
 pub use execution::bot::TradingBotSystem;
-pub use risk::RiskManager; 
+pub use risk::RiskManager;
+pub use strategy::Strategy;

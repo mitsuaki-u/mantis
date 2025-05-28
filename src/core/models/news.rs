@@ -8,4 +8,4 @@ pub struct NewsItem {
     pub source: String,
     pub published_at: DateTime<Utc>,
     pub categories: Vec<String>,
-} 
+}

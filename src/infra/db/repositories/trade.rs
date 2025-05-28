@@ -1,9 +1,8 @@
 use crate::core::error::{Error, Result};
-use crate::infra::db::database::Client as PgClient;
 use crate::infra::db::queries;
 use crate::infra::db::Database;
 use chrono::{DateTime, Utc};
-use log::{debug, error, info, trace, warn};
+use log::{debug, error, info, warn};
 use tokio_postgres::types::ToSql;
 
 /// Detailed trade record from the database

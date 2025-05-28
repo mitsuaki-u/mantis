@@ -1,16 +1,21 @@
-use crate::core::error::Error;
-use crate::core::models::wallet::{WalletInfo, TokenHolding, Transaction};
+use crate::core::error::{Error, Result};
+use crate::core::models::wallet::{TokenHolding, Transaction, WalletInfo};
+use crate::domain::dex::DexClient;
 use log::{debug, info};
 use reqwest::Client;
 use serde_json::Value;
 
 const BASE_URL: &str = "https://api.etherscan.io/api";
 
-pub async fn get_wallet_info(address: &str, chain: &str) -> Result<WalletInfo, Error> {
-    info!("Fetching wallet info for {} on {}", address, chain);
-    
-    let (balance, tokens) = get_wallet_holdings(address, chain).await?;
-    let transactions = get_wallet_transactions(address, chain).await?;
+pub async fn get_wallet_info(
+    address: &str,
+    _chain: &str,
+    _dex_client: &DexClient,
+) -> Result<WalletInfo> {
+    info!("Fetching wallet info for {} on {}", address, _chain);
+
+    let (balance, tokens) = get_wallet_holdings(address, _chain).await?;
+    let transactions = get_wallet_transactions(address, _chain).await?;
 
     Ok(WalletInfo {
         address: address.to_string(),
@@ -20,42 +25,53 @@ pub async fn get_wallet_info(address: &str, chain: &str) -> Result<WalletInfo, E
     })
 }
 
-async fn get_wallet_holdings(address: &str, chain: &str) -> Result<(f64, Vec<TokenHolding>), Error> {
+async fn get_wallet_holdings(address: &str, _chain: &str) -> Result<(f64, Vec<TokenHolding>)> {
     let config = crate::config::Config::load()?;
-    let api_key = config.api_keys.etherscan
+    let api_key = config
+        .api_keys
+        .etherscan
         .as_ref()
         .ok_or_else(|| Error::Config("Etherscan API key not set".to_string()))?;
 
     let client = Client::new();
-    let url = format!("{}/module=account&action=balance&address={}&tag=latest", BASE_URL, address);
+    let url = format!(
+        "{}/module=account&action=balance&address={}&tag=latest",
+        BASE_URL, address
+    );
     debug!("Fetching wallet balance: {}", url);
 
-    let response = client.get(&url)
+    let response = client
+        .get(&url)
         .query(&[("apikey", api_key)])
         .send()
         .await?
         .error_for_status()?;
-        
+
     let data: Value = response.json().await?;
-    
+
     let balance = data["result"]
         .as_str()
         .ok_or_else(|| Error::Parse("Invalid balance response".to_string()))?
         .parse::<f64>()
-        .map_err(|_| Error::Parse("Failed to parse balance".to_string()))? / 1e18;
+        .map_err(|_| Error::Parse("Failed to parse balance".to_string()))?
+        / 1e18;
 
     // Get token holdings
-    let tokens_url = format!("{}/module=account&action=tokentx&address={}&sort=desc", BASE_URL, address);
+    let tokens_url = format!(
+        "{}/module=account&action=tokentx&address={}&sort=desc",
+        BASE_URL, address
+    );
     debug!("Fetching token transactions: {}", tokens_url);
 
-    let response = client.get(&tokens_url)
+    let response = client
+        .get(&tokens_url)
         .query(&[("apikey", api_key)])
         .send()
         .await?
         .error_for_status()?;
-        
+
     let data: Value = response.json().await?;
-    
+
     let mut tokens = parse_token_holdings(&data)
         .ok_or_else(|| Error::Parse("Failed to parse token holdings".to_string()))?;
 
@@ -65,24 +81,30 @@ async fn get_wallet_holdings(address: &str, chain: &str) -> Result<(f64, Vec<Tok
     Ok((balance, tokens))
 }
 
-async fn get_wallet_transactions(address: &str, chain: &str) -> Result<Vec<Transaction>, Error> {
+async fn get_wallet_transactions(address: &str, _chain: &str) -> Result<Vec<Transaction>> {
     let config = crate::config::Config::load()?;
-    let api_key = config.api_keys.etherscan
+    let api_key = config
+        .api_keys
+        .etherscan
         .as_ref()
         .ok_or_else(|| Error::Config("Etherscan API key not set".to_string()))?;
 
     let client = Client::new();
-    let url = format!("{}/module=account&action=txlist&address={}&sort=desc", BASE_URL, address);
+    let url = format!(
+        "{}/module=account&action=txlist&address={}&sort=desc",
+        BASE_URL, address
+    );
     debug!("Fetching transactions: {}", url);
 
-    let response = client.get(&url)
+    let response = client
+        .get(&url)
         .query(&[("apikey", api_key)])
         .send()
         .await?
         .error_for_status()?;
-        
+
     let data: Value = response.json().await?;
-    
+
     let transactions = data["result"]
         .as_array()
         .ok_or_else(|| Error::Parse("Invalid transaction response".to_string()))?
@@ -111,14 +133,15 @@ fn parse_transaction(tx: &Value) -> Option<Transaction> {
 
 fn parse_token_holdings(data: &Value) -> Option<Vec<TokenHolding>> {
     let mut token_map = std::collections::HashMap::new();
-    
+
     if let Some(txs) = data["result"].as_array() {
         for tx in txs {
             let token_name = tx["tokenName"].as_str()?;
             let token_symbol = tx["tokenSymbol"].as_str()?;
             let balance = tx["value"].as_str()?.parse::<f64>().ok()?;
-            
-            token_map.entry(token_symbol.to_string())
+
+            token_map
+                .entry(token_symbol.to_string())
                 .and_modify(|holding: &mut TokenHolding| {
                     holding.balance = format!("{:.4}", balance);
                 })
@@ -131,19 +154,19 @@ fn parse_token_holdings(data: &Value) -> Option<Vec<TokenHolding>> {
                 });
         }
     }
-    
+
     Some(token_map.into_values().collect())
 }
 
-async fn enrich_token_prices(tokens: &mut Vec<TokenHolding>) -> Result<(), Error> {
+async fn enrich_token_prices(tokens: &mut Vec<TokenHolding>) -> Result<()> {
     let client = Client::new();
-    
+
     for token in tokens {
         let url = format!(
             "https://api.coingecko.com/api/v3/simple/price?ids={}&vs_currencies=usd",
             token.symbol.to_lowercase()
         );
-        
+
         if let Ok(response) = client.get(&url).send().await {
             if let Ok(data) = response.json::<Value>().await {
                 if let Some(price) = data[token.symbol.to_lowercase()]["usd"].as_f64() {
@@ -155,6 +178,6 @@ async fn enrich_token_prices(tokens: &mut Vec<TokenHolding>) -> Result<(), Error
             }
         }
     }
-    
+
     Ok(())
-} 
+}

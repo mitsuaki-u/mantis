@@ -1,24 +1,29 @@
 use super::{Actor, Command, Event, Message, Query, QueryResult};
-use super::{ExecutionEvent, MarketEvent, RiskEvent};
+use super::{
+    DexTransactionEvent, EventType, ExecutionEvent, MarketEvent, RiskEvent, StrategyEvent,
+};
 use crate::config::Config;
 use crate::core::error::{Error, Result};
-use crate::core::models::market::TokenMetrics as DbTokenMetrics;
-use crate::domain::trading::execution::bot::is_forced_shutdown;
-use crate::infra::db::queries;
+use crate::domain::dex::TransactionStatus;
 use crate::infra::db::queue::{
     PositionUpdateOperation, PositionUpdateQueue, TradeOperation, TradeOperationQueue,
 };
 use crate::infra::db::repositories::RepositoryFactory;
-use tokio_postgres::types::ToSql;
+
+use crate::core::models::token::TokenData;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use log::{debug, error, info, trace, warn};
 use tokio;
+use tokio::sync::mpsc;
 use uuid::Uuid;
+
+use crate::domain::trading::strategy::{Position as StrategyPosition, Signal};
+
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub struct DatabaseActor {
     repo_factory: RepositoryFactory,
@@ -31,6 +36,11 @@ pub struct DatabaseActor {
 
     last_activity_time: Arc<std::sync::Mutex<Instant>>,
     last_maintenance_time: Arc<std::sync::Mutex<Option<DateTime<Utc>>>>,
+
+    running: bool,
+    shutdown_flag: Arc<AtomicBool>,
+    event_sender: mpsc::Sender<Event>,
+    event_receiver: Option<mpsc::Receiver<Event>>,
 }
 
 impl Clone for DatabaseActor {
@@ -44,12 +54,13 @@ impl Clone for DatabaseActor {
             task_handle: None,
             last_activity_time: self.last_activity_time.clone(),
             last_maintenance_time: self.last_maintenance_time.clone(),
+            running: self.running,
+            shutdown_flag: self.shutdown_flag.clone(),
+            event_sender: self.event_sender.clone(),
+            event_receiver: None,
         }
     }
 }
-
-static mut SHUTDOWN_TX: Option<tokio::sync::mpsc::Sender<()>> = None;
-static SHUTDOWN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 impl DatabaseActor {
     pub fn new(
@@ -58,6 +69,7 @@ impl DatabaseActor {
         config: Arc<crate::config::Config>,
     ) -> Self {
         let (position_queue, trade_queue) = Self::create_queues(&config);
+        let (event_sender, event_receiver) = mpsc::channel(100);
 
         Self {
             repo_factory,
@@ -68,6 +80,10 @@ impl DatabaseActor {
             task_handle: None,
             last_activity_time: Arc::new(std::sync::Mutex::new(Instant::now())),
             last_maintenance_time: Arc::new(std::sync::Mutex::new(None)),
+            running: false,
+            shutdown_flag: Arc::new(AtomicBool::new(false)),
+            event_sender,
+            event_receiver: Some(event_receiver),
         }
     }
 
@@ -172,7 +188,8 @@ impl DatabaseActor {
 
     fn queue_trade_operation(
         &self,
-        token_id: String,
+        canonical_token_id: String,
+        provider_token_id: String,
         price: f64,
         size: f64,
         is_buy: bool,
@@ -181,18 +198,19 @@ impl DatabaseActor {
         // Validate that we don't process zero-size or zero-price trades
         if size <= 0.0 || price <= 0.0 {
             info!("🚫 Skipping trade operation for {} with zero or negative values: price=${:.4}, size=${:.2}", 
-                 token_id, price, size);
+                 canonical_token_id, price, size);
             return;
         }
 
         if let Some(ref queue) = self.trade_queue {
             info!(
                 "Trade queue available, attempting to enqueue operation for {}",
-                token_id
+                canonical_token_id
             );
 
             let operation = TradeOperation {
-                token_id: token_id.clone(),
+                canonical_token_id: canonical_token_id.clone(),
+                provider_token_id: provider_token_id.clone(),
                 price,
                 size,
                 is_buy,
@@ -208,21 +226,25 @@ impl DatabaseActor {
 
             match queue.enqueue(operation.clone()) {
                 Ok(_) => {
-                    debug!("Enqueued trade operation for {} in Redis queue", token_id);
+                    debug!(
+                        "Enqueued trade operation for {} in Redis queue",
+                        canonical_token_id
+                    );
                     return;
                 }
                 Err(e) => {
-                    error!("Failed to queue trade operation for {}: {} - Redis enqueue failed, using fallback", token_id, e);
+                    error!("Failed to queue trade operation for {}: {} - Redis enqueue failed, using fallback", canonical_token_id, e);
                     self.queue_trade_operation_fallback(operation);
                 }
             }
         } else {
             warn!(
                 "Trade operation queue not available, using fallback for token {}",
-                token_id
+                canonical_token_id
             );
             self.queue_trade_operation_fallback(TradeOperation {
-                token_id: token_id.clone(),
+                canonical_token_id: canonical_token_id.clone(),
+                provider_token_id: provider_token_id.clone(),
                 price,
                 size,
                 is_buy,
@@ -240,7 +262,8 @@ impl DatabaseActor {
 
     fn queue_position_close(
         &self,
-        token_id: String,
+        canonical_token_id: String,
+        provider_token_id: String,
         price: f64,
         size: f64,
         entry_price: f64,
@@ -251,21 +274,22 @@ impl DatabaseActor {
         // Validate that we don't process zero-size or zero-price trades
         if size <= 0.0 || price <= 0.0 {
             info!("🚫 Skipping position close for {} with zero or negative values: price=${:.4}, size=${:.2}", 
-                 token_id, price, size);
+                 canonical_token_id, price, size);
             return;
         }
 
         if let Some(ref queue) = self.trade_queue {
             info!(
                 "Trade queue available, attempting to enqueue position close for {}",
-                token_id
+                canonical_token_id
             );
 
             let operation = TradeOperation {
-                token_id: token_id.clone(),
+                canonical_token_id: canonical_token_id.clone(),
+                provider_token_id: provider_token_id.clone(),
                 price,
                 size,
-                is_buy: false, // Position close is always a SELL
+                is_buy: false,
                 timestamp,
                 position_id: None,
                 is_position_close: true,
@@ -278,21 +302,25 @@ impl DatabaseActor {
 
             match queue.enqueue(operation.clone()) {
                 Ok(_) => {
-                    debug!("Enqueued position close for {} in Redis queue", token_id);
+                    debug!(
+                        "Enqueued position close for {} in Redis queue",
+                        canonical_token_id
+                    );
                     return;
                 }
                 Err(e) => {
-                    error!("Failed to queue position close for {}: {} - Redis enqueue failed, using fallback", token_id, e);
+                    error!("Failed to queue position close for {}: {} - Redis enqueue failed, using fallback", canonical_token_id, e);
                     self.queue_position_close_fallback(operation);
                 }
             }
         } else {
             warn!(
                 "Trade queue not available, using fallback for position close trade {}",
-                token_id
+                canonical_token_id
             );
             self.queue_position_close_fallback(TradeOperation {
-                token_id: token_id.clone(),
+                canonical_token_id: canonical_token_id.clone(),
+                provider_token_id: provider_token_id.clone(),
                 price,
                 size,
                 is_buy: false,
@@ -308,297 +336,6 @@ impl DatabaseActor {
         }
     }
 
-    /// Process a trade operation (Now async)
-    async fn process_trade(&self, trade: TradeOperation) -> Result<()> {
-        let trade_repo = self.repo_factory.trade_repository();
-        let token_repo = self.repo_factory.token_repository();
-        let db = trade_repo.get_db();
-        let token_id = trade.token_id.to_lowercase();
-
-        debug!(
-            "Processing trade for token {}: price=${:.4}, size={}, is_buy={}",
-            token_id, trade.price, trade.size, trade.is_buy
-        );
-
-        // Validate trade parameters
-        if trade.price <= 0.0 || trade.size <= 0.0 {
-            error!(
-                "❌ Rejecting trade for {} with invalid price ${:.4} or size ${:.2}",
-                token_id, trade.price, trade.size
-            );
-            return Err(Error::InvalidInput(format!(
-                "Invalid trade values: price={}, size={}",
-                trade.price, trade.size
-            )));
-        }
-
-        // First ensure the token exists
-        if let Err(e) = token_repo.ensure_token_exists(&token_id).await {
-            error!(
-                "DB Error: Failed to ensure token {} exists: {}. Aborting trade processing.",
-                token_id, e
-            );
-            return Err(e);
-        }
-
-        // If this is a position close, handle it differently
-        if trade.is_position_close {
-            warn!("process_position_close needs to be async. Skipping call for now.");
-            return Ok(()); // Placeholder
-                           // return self.process_position_close(trade).await;
-        }
-
-        // Record the trade using the pooled transaction system
-        // Replace retry_pooled_transaction with direct client transaction
-        let result = async {
-            let mut client = db.get_connection().await?;
-            let tx = client
-                .transaction()
-                .await
-                .map_err(|e| Error::Database(e.to_string()))?;
-
-            let normalized_token_id = token_id.to_lowercase();
-            let timestamp_str = trade.timestamp.to_rfc3339();
-            let is_buy_int = if trade.is_buy { 1 } else { 0 };
-            let is_paper_int = if self.config.trading.paper_trading {
-                1
-            } else {
-                0
-            };
-
-            if let Some(pos_id) = trade.position_id {
-                // Use explicit Vec type AND cast each element
-                let params: Vec<&(dyn ToSql + Sync)> = vec![
-                    &normalized_token_id as &(dyn ToSql + Sync),
-                    &trade.price as &(dyn ToSql + Sync),
-                    &trade.size as &(dyn ToSql + Sync),
-                    &timestamp_str as &(dyn ToSql + Sync),
-                    &is_buy_int as &(dyn ToSql + Sync),
-                    &is_paper_int as &(dyn ToSql + Sync),
-                    &pos_id as &(dyn ToSql + Sync),
-                ];
-                tx.execute(
-                    queries::trade::INSERT_TRADE_WITH_POSITION_ID,
-                    &params, // Pass slice of the Vec
-                )
-                .await
-                .map_err(|e| Error::Database(e.to_string()))?;
-            } else {
-                // Use explicit Vec type AND cast each element
-                let params: Vec<&(dyn ToSql + Sync)> = vec![
-                    &normalized_token_id as &(dyn ToSql + Sync),
-                    &trade.price as &(dyn ToSql + Sync),
-                    &trade.size as &(dyn ToSql + Sync),
-                    &timestamp_str as &(dyn ToSql + Sync),
-                    &is_buy_int as &(dyn ToSql + Sync),
-                    &is_paper_int as &(dyn ToSql + Sync),
-                ];
-                tx.execute(
-                    queries::trade::INSERT_TRADE_SELL,
-                    &params, // Pass slice of the Vec
-                )
-                .await
-                .map_err(|e| Error::Database(e.to_string()))?;
-            }
-
-            info!(
-                "✅ Recorded {} trade for {} at ${:.4}",
-                if trade.is_buy { "BUY" } else { "SELL" },
-                normalized_token_id,
-                trade.price
-            );
-
-            tx.commit()
-                .await
-                .map_err(|e| Error::Database(e.to_string()))
-        }
-        .await; // Execute the async block
-
-        match result {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                error!(
-                    "❌ Failed to record trade for {} after maximum retries: {}",
-                    token_id, e
-                );
-                Err(e)
-            }
-        }
-    }
-
-    /// Process a position close operation (Needs to be async)
-    async fn process_position_close(&self, trade: TradeOperation) -> Result<()> {
-        let trade_repo = self.repo_factory.trade_repository();
-        let db = trade_repo.get_db();
-        let token_id = trade.token_id.to_lowercase();
-
-        debug!("Processing position close for token {}", token_id);
-
-        // Calculate profit/loss (optional, can be done elsewhere)
-        let (profit, profit_pct) =
-            if let (Some(entry_price), Some(_entry_time)) = (trade.entry_price, trade.entry_time) {
-                let profit = trade.size * (trade.price - entry_price);
-                let profit_pct = if entry_price != 0.0 {
-                    (trade.price - entry_price) / entry_price * 100.0
-                } else {
-                    0.0
-                };
-                (profit, profit_pct)
-            } else {
-                warn!(
-                    "Missing entry price/time for P/L calculation on position close for {}",
-                    token_id
-                );
-                (0.0, 0.0)
-            };
-
-        // Record the trade and delete the position using a transaction
-        let result = async {
-            let mut client = db.get_connection().await?;
-            let tx = client
-                .transaction()
-                .await
-                .map_err(|e| Error::Database(e.to_string()))?;
-
-            let normalized_token_id = token_id.to_lowercase();
-            let timestamp_str = trade.timestamp.to_rfc3339();
-            let is_paper_int = if self.config.trading.paper_trading {
-                1
-            } else {
-                0
-            };
-
-            // Insert the closing trade
-            // Use explicit Vec type AND cast each element
-            let close_params: Vec<&(dyn ToSql + Sync)> = vec![
-                &normalized_token_id as &(dyn ToSql + Sync),
-                &trade.price as &(dyn ToSql + Sync),
-                &trade.size as &(dyn ToSql + Sync),
-                &timestamp_str as &(dyn ToSql + Sync),
-                &is_paper_int as &(dyn ToSql + Sync),
-            ];
-            tx.execute(
-                queries::trade::INSERT_TRADE_SELL,
-                &close_params, // Pass slice of the Vec
-            )
-            .await
-            .map_err(|e| Error::Database(e.to_string()))?;
-
-            // Delete the position if requested
-            if trade.delete_position {
-                // Use explicit Vec type AND cast each element
-                let delete_params: Vec<&(dyn ToSql + Sync)> = vec![
-                    &normalized_token_id as &(dyn ToSql + Sync),
-                    &is_paper_int as &(dyn ToSql + Sync),
-                ];
-                let rows_deleted = tx
-                    .execute(
-                        "DELETE FROM positions WHERE token_id = $1 AND is_paper = $2",
-                        &delete_params, // Pass slice of the Vec
-                    )
-                    .await
-                    .map_err(|e| Error::Database(e.to_string()))?;
-                if rows_deleted == 0 {
-                    warn!(
-                        "Tried to delete position {} during close, but it was not found.",
-                        normalized_token_id
-                    );
-                }
-            }
-
-            info!(
-                "✅ Recorded position close for {} at ${:.4} with P/L ${:.2} ({:.1}%)",
-                normalized_token_id, trade.price, profit, profit_pct
-            );
-
-            tx.commit()
-                .await
-                .map_err(|e| Error::Database(e.to_string()))
-        }
-        .await; // Execute the async block
-
-        match result {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                error!(
-                    "❌ Failed to process position close for {}: {}",
-                    token_id, e
-                );
-                Err(e)
-            }
-        }
-    }
-
-    /// Check if it's a good time to run maintenance tasks
-    ///
-    /// Returns true if:
-    /// 1. It's been at least 24 hours since the last maintenance
-    /// 2. The system is currently idle (no recent activity)
-    async fn should_run_maintenance(&self) -> bool {
-        // Check last maintenance time
-        let maintenance_interval = chrono::Duration::hours(24);
-        let now = Utc::now();
-
-        // Check when maintenance was last performed
-        let should_run_by_time = {
-            let last_maintenance = self.last_maintenance_time.lock().unwrap();
-            match *last_maintenance {
-                None => true, // Never run before, so yes, run it
-                Some(last_time) => now.signed_duration_since(last_time) >= maintenance_interval,
-            }
-        };
-
-        // If it's not time yet by schedule, don't run
-        if !should_run_by_time {
-            return false;
-        }
-
-        // Check if the system is idle
-        let is_idle = {
-            let last_activity = self.last_activity_time.lock().unwrap();
-            // Consider the system idle if no activity in the last 5 minutes
-            let idle_threshold = std::time::Duration::from_secs(5 * 60);
-            last_activity.elapsed() >= idle_threshold
-        };
-
-        should_run_by_time && is_idle
-    }
-
-    /// Schedule maintenance to run during quiet periods
-    async fn schedule_maintenance(&self) {
-        let this = self.clone();
-        info!("Maintenance scheduler check on startup.");
-        tokio::spawn(async move {
-            if this.should_run_maintenance().await {
-                info!("Running scheduled maintenance (startup check)...",);
-                if let Err(e) = this.run_maintenance_now().await {
-                    error!("Sched startup maint FAIL: {}", e);
-                }
-            }
-            let mut check_interval = tokio::time::interval(tokio::time::Duration::from_secs(3600)); // Hourly check
-            info!("Maintenance scheduler started (hourly check).");
-            loop {
-                tokio::select! {
-                    _ = check_interval.tick() => {
-                        // Check shutdown signal FIRST
-                        if is_forced_shutdown() {
-                            info!("Maintenance scheduler stopping due to shutdown signal.");
-                            break; // Exit the loop
-                        }
-
-                        trace!("Checking if scheduled maintenance needed...");
-                        if this.should_run_maintenance().await {
-                            info!("Running scheduled maintenance (periodic check)...",);
-                            if let Err(e) = this.run_maintenance_now().await { error!("Sched periodic maint FAIL: {}", e); }
-                        }
-                    }
-                    // Can add a dedicated shutdown channel receiver here if needed later
-                }
-            }
-            info!("Maintenance scheduler task finished."); // Log when loop exits
-        });
-    }
-
     /// Get maintenance status information including last run time and next scheduled time
     fn get_maintenance_status(&self) -> (Option<DateTime<Utc>>, Option<DateTime<Utc>>) {
         let last_run = *self.last_maintenance_time.lock().unwrap();
@@ -608,16 +345,21 @@ impl DatabaseActor {
         (last_run, next_sched)
     }
 
-    fn queue_position_update_fallback(&self, operation: PositionUpdateOperation) {
-        // ... implementation ...
+    // Fallback methods for when direct DB operations fail
+    fn queue_position_update_fallback(&self, _operation: PositionUpdateOperation) {
+        // Prefixed
+        // TODO: Implement fallback queueing logic (e.g., to an in-memory queue or a file)
+        error!("Fallback: Failed to queue position update directly. This operation is lost if not handled by a persistent queue.");
     }
-
-    fn queue_trade_operation_fallback(&self, operation: TradeOperation) {
-        // ... implementation ...
+    fn queue_trade_operation_fallback(&self, _operation: TradeOperation) {
+        // Prefixed
+        // TODO: Implement fallback queueing logic
+        error!("Fallback: Failed to queue trade operation directly. This operation is lost if not handled by a persistent queue.");
     }
-
-    fn queue_position_close_fallback(&self, operation: TradeOperation) {
-        // ... implementation ...
+    fn queue_position_close_fallback(&self, _operation: TradeOperation) {
+        // Prefixed
+        // TODO: Implement fallback queueing logic
+        error!("Fallback: Failed to queue position close directly. This operation is lost if not handled by a persistent queue.");
     }
 
     async fn gather_metrics(&self) -> serde_json::Value {
@@ -743,9 +485,132 @@ impl DatabaseActor {
         Ok(())
     }
 
-    // Placeholder method for handling events
+    async fn log_dex_transaction_status(&self, status_event: &TransactionStatus) -> Result<()> {
+        let repo = self.repo_factory.dex_transaction_log_repository();
+        let (tx_id, status_text, event_time, details_json) = match status_event {
+            TransactionStatus::Queued {
+                tx_id,
+                submission_time,
+                priority,
+            } => (
+                tx_id.clone(),
+                "Queued".to_string(),
+                *submission_time,
+                Some(serde_json::json!({ "priority": priority })),
+            ),
+            TransactionStatus::Pending {
+                tx_id,
+                submission_time,
+                last_checked,
+                block_height,
+                retry_count,
+            } => (
+                tx_id.clone(),
+                "Pending".to_string(),
+                *last_checked,
+                Some(serde_json::json!({
+                    "submission_time": submission_time,
+                    "block_height": block_height,
+                    "retry_count": retry_count
+                })),
+            ),
+            TransactionStatus::Confirmed {
+                details,
+                confirmations,
+                required_confirmations,
+                finality_probability,
+            } => {
+                (
+                    details.tx_id.clone(),
+                    "Confirmed".to_string(),
+                    Utc::now(), // Or use details.confirmation_time if available and more suitable
+                    Some(serde_json::json!({
+                        "details": details, // TransactionDetails itself should be Serialize
+                        "confirmations": confirmations,
+                        "required_confirmations": required_confirmations,
+                        "finality_probability": finality_probability
+                    })),
+                )
+            }
+            TransactionStatus::Success {
+                details,
+                execution_time,
+                gas_efficiency,
+            } => {
+                (
+                    details.tx_id.clone(),
+                    "Success".to_string(),
+                    details.confirmation_time.unwrap_or_else(Utc::now),
+                    Some(serde_json::json!({
+                        "details": details, // TransactionDetails
+                        "execution_time_ms": execution_time.num_milliseconds(),
+                        "gas_efficiency": gas_efficiency
+                    })),
+                )
+            }
+            TransactionStatus::Failed {
+                tx_id,
+                reason,
+                error_code,
+                gas_used,
+                revert_reason,
+                recovery_suggestion,
+            } => (
+                tx_id.clone(),
+                "Failed".to_string(),
+                Utc::now(),
+                Some(serde_json::json!({
+                    "reason": reason,
+                    "error_code": error_code,
+                    "gas_used": gas_used,
+                    "revert_reason": revert_reason,
+                    "recovery_suggestion": recovery_suggestion
+                })),
+            ),
+            TransactionStatus::Dropped {
+                tx_id,
+                reason,
+                replacement_tx,
+                gas_price_delta,
+                network_congestion,
+            } => (
+                tx_id.clone(),
+                "Dropped".to_string(),
+                Utc::now(),
+                Some(serde_json::json!({
+                    "reason": reason,
+                    "replacement_tx": replacement_tx,
+                    "gas_price_delta": gas_price_delta,
+                    "network_congestion": network_congestion
+                })),
+            ),
+        };
+
+        info!(
+            "DatabaseActor: Logging DEX event - TxID: {}, Status: {}, Time: {}",
+            tx_id, status_text, event_time
+        );
+
+        match repo
+            .log_event(&tx_id, &status_text, event_time, details_json)
+            .await
+        {
+            Ok(_) => debug!(
+                "DatabaseActor: Successfully logged dex_transaction_event for {}",
+                tx_id
+            ),
+            Err(e) => error!(
+                "DatabaseActor: Failed to log dex_transaction_event for {}: {}",
+                tx_id, e
+            ),
+        }
+        Ok(())
+    }
+
     async fn handle_event(&self, event: Event) -> Result<()> {
-        trace!("Handling event: {:?}", event);
+        trace!("DatabaseActor received event: {:?}", event);
+        *self.last_activity_time.lock().unwrap() = Instant::now();
+
         match event {
             Event::Market(market_event) => match market_event {
                 MarketEvent::PriceUpdate {
@@ -753,66 +618,259 @@ impl DatabaseActor {
                     price,
                     volume,
                     timestamp,
+                    ..
                 } => {
-                    let token_repo = self.repo_factory.token_repository();
-                    // Use store_price_data, assuming token metadata is handled elsewhere or by ensure_token_exists
-                    // Ensure token exists before storing price data might be prudent
-                    match token_repo.ensure_token_exists(&token_id).await {
-                        Ok(_) => {
-                            match token_repo
-                                .store_price_data(&token_id, price, volume.unwrap_or(0.0))
-                                .await
-                            {
-                                Ok(_) => {
-                                    debug!("Successfully stored price data for {}", token_id);
-                                }
-                                Err(e) => {
-                                    error!("Failed to store price data for {}: {}", token_id, e);
-                                    // Decide if this error should be propagated
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            error!("Failed to ensure token {} exists before storing price: {}. Price data not stored.", token_id, e);
-                        }
-                    }
+                    info!(
+                        "DBActor: MarketPriceUpdate - Token: {}, Price: {:.4}, Volume: {:?}, Timestamp: {}",
+                        token_id, price, volume, timestamp
+                    );
+                    // TODO: If direct storage of every price tick is needed, implement here.
+                    // For now, relying on other actors (e.g., StrategyActor) to process and
+                    // potentially trigger DB updates for aggregated data or trades.
                 }
-                MarketEvent::MarketDataError(err) => {
-                    error!("Received MarketDataError event: {}", err);
-                    // Potentially log this error to a different system/table
+                MarketEvent::VolumeUpdate {
+                    token_id,
+                    volume,
+                    timestamp,
+                    ..
+                } => {
+                    info!(
+                        "DBActor: MarketVolumeUpdate - Token: {}, Volume: {:.2}, Timestamp: {}",
+                        token_id, volume, timestamp
+                    );
+                    // TODO: Similar to PriceUpdate, direct storage of every volume tick might be excessive.
+                    // Relying on other actors for processing.
                 }
-                MarketEvent::SupervisorRecoveryRequest(msg) => {
-                    info!("Received SupervisorRecoveryRequest: {}", msg);
-                    // Log recovery attempts
+                MarketEvent::MarketDataError(e) => {
+                    warn!("DBActor: MarketDataError received: {}", e);
                 }
                 MarketEvent::StatusCheck => {
-                    // Explicitly handle StatusCheck
-                    trace!("DatabaseActor ignoring StatusCheck market event.");
+                    trace!("DBActor: Market StatusCheck ignored.");
                 }
-                _ => {
-                    trace!("DatabaseActor ignoring unhandled MarketEvent variant.");
+                MarketEvent::SupervisorRecoveryRequest(req) => {
+                    info!(
+                        "DBActor: SupervisorRecoveryRequest: {}. (Not directly handled by DB)",
+                        req
+                    );
+                }
+                MarketEvent::NewTokenDiscovered {
+                    token_id,
+                    name,
+                    symbol,
+                    price,
+                    source,
+                    timestamp,
+                    ..
+                } => {
+                    info!(
+                        "DBActor: NewTokenDiscovered - Token ID: {}, Name: {}, Symbol: {}, Price: {:.4}, Source: {}, Timestamp: {}",
+                        token_id, name, symbol, price, source, timestamp
+                    );
+                    let token_repo = self.repo_factory.token_repository();
+                    let token_id_norm = TokenData::normalize_token_id(&token_id); // Ensure consistent casing
+
+                    // 1. Ensure the token record exists
+                    if let Err(e) = token_repo.ensure_token_exists(&token_id_norm).await {
+                        error!("DBActor: Failed to ensure token {} exists: {}. Skipping further processing for this token discovery.", token_id_norm, e);
+                        // Optionally, you could return here or decide how critical this failure is.
+                        // For now, we'll log and attempt other operations.
+                    }
+
+                    // 2. Update metadata (name, symbol)
+                    if let Err(e) = token_repo
+                        .update_token_metadata(&token_id_norm, &symbol, &name)
+                        .await
+                    {
+                        error!(
+                            "DBActor: Failed to update metadata for new token {}: {}",
+                            token_id_norm, e
+                        );
+                    }
+
+                    // 3. Store initial price (volume is not in NewTokenDiscovered, so use 0.0)
+                    if let Err(e) = token_repo
+                        .store_price_data(&token_id_norm, price, 0.0)
+                        .await
+                    {
+                        error!(
+                            "DBActor: Failed to store initial price for new token {}: {}",
+                            token_id_norm, e
+                        );
+                    }
+
+                    // Logging for source and discovery timestamp (as persistence is deferred)
+                    debug!(
+                        "DBActor: NewTokenDiscovered - Source: '{}', Discovery Timestamp: '{}' for token {} (logged, not persisted to dedicated columns yet).",
+                        source, timestamp, token_id_norm
+                    );
+                }
+                MarketEvent::MarketAnomalyDetected {
+                    token_id,
+                    anomaly_type,
+                    description,
+                    severity,
+                    timestamp,
+                    ..
+                } => {
+                    // Use WARN or ERROR based on severity if possible, default to WARN
+                    warn!(
+                        "DBActor: MarketAnomalyDetected - Token: {}, Type: {}, Severity: {}, Description: '{}', Timestamp: {}",
+                        token_id, anomaly_type, severity, description, timestamp
+                    );
+                    // TODO: Future: Log to a dedicated 'market_anomalies' table with all details.
+                    // For now, relies on structured logging.
                 }
             },
-            Event::Execution(ExecutionEvent::OrderExecuted {
-                token_id,
-                signal,
-                size,
-                price,
-                timestamp,
-            }) => {
-                // TRADE RECORDING REMOVED HERE:
-                // The trade associated with opening a position is already recorded atomically
-                // within PositionRepository::record_position_with_trade by the ExecutionActor.
-                // Recording it again here based on the OrderExecuted event causes duplicates.
-                // If standalone trades (not linked to positions) need recording based on this event,
-                // specific logic would be required to differentiate.
-                debug!(
-                    "DatabaseActor received OrderExecuted event for {} - Trade recording is handled elsewhere.",
+            Event::Execution(execution_event) => match execution_event {
+                ExecutionEvent::OrderExecuted {
+                    canonical_token_id,
+                    provider_token_id,
+                    signal,
+                    executed_value_usd,
+                    token_quantity,
+                    price_per_token,
+                    timestamp,
+                } => {
+                    info!(
+                        "DBActor: OrderExecuted Event for {} (provider ID: {}) - Signal: {:?}, Value: {}, Quantity: {}, Price: {}, Timestamp: {}",
+                        canonical_token_id, provider_token_id, signal, executed_value_usd, token_quantity, price_per_token, timestamp
+                    );
+                    if signal == Signal::Buy {
+                        if token_quantity <= 0.0 {
+                            error!("DatabaseActor: Calculated position size is zero or negative for OrderExecuted event for {}. Cannot record position.", canonical_token_id);
+                            return Ok(());
+                        }
+
+                        let final_strategy_position_data = StrategyPosition {
+                            token_id: canonical_token_id.clone(),
+                            provider_id: provider_token_id.clone(),
+                            entry_price: price_per_token,
+                            current_price: price_per_token,
+                            highest_price: price_per_token,
+                            size: token_quantity, // Use token_quantity for position size
+                            entry_time: timestamp,
+                            unrealized_pnl: 0.0,
+                        };
+
+                        match self
+                            .repo_factory
+                            .position_repository()
+                            .record_position_with_trade(
+                                &final_strategy_position_data,
+                                price_per_token, // Trade price
+                                token_quantity,  // Trade size (amount of token)
+                                timestamp,
+                            )
+                            .await
+                        {
+                            Ok(db_position_id) => {
+                                info!("DatabaseActor: Recorded new position (DB ID: {}) and BUY trade for token {} from OrderExecuted event", db_position_id, canonical_token_id);
+                            }
+                            Err(e) => {
+                                error!("DatabaseActor: Failed to record position/trade for token {} from OrderExecuted event: {}", canonical_token_id, e);
+                            }
+                        }
+                    } else {
+                        // For SELL signals, we might also queue a trade operation if needed,
+                        // though typically position closure is handled by RiskEvent::PositionClosed.
+                        // If OrderExecuted for a SELL is meant to *only* log the trade and not affect position state here:
+                        self.queue_trade_operation(
+                            canonical_token_id.clone(),
+                            provider_token_id.clone(), // Pass provider_token_id
+                            price_per_token,
+                            token_quantity,
+                            false, // is_buy is false for a sell
+                            timestamp,
+                        );
+                    }
+                }
+                ExecutionEvent::PositionUpdate {
+                    token_id,
+                    current_price,
+                    pnl,
+                    timestamp,
+                    ..
+                } => {
+                    info!(
+                        "DBActor: PositionUpdate - Token: {}, Price: {:.4}, PNL: {:.2}, Timestamp: {}",
+                        token_id, current_price, pnl, timestamp
+                    );
+                    self.queue_position_update(token_id.to_string(), current_price, pnl, timestamp);
+                }
+                ExecutionEvent::StatusCheck => trace!("DBActor: Execution StatusCheck ignored."),
+                ExecutionEvent::OrderFailed {
+                    token_id,
+                    order_id,
+                    reason,
+                    timestamp,
+                    ..
+                } => {
+                    error!(
+                        "DBActor: OrderFailed - Token: {}, OrderID: {:?}, Reason: '{}', Timestamp: {}",
+                        token_id, order_id, reason, timestamp
+                    );
+                    // TODO: Future: Log to a dedicated 'order_failures' table or use dex_transaction_logs
+                    // if there's a corresponding blockchain tx_id that failed.
+                    // For now, relies on structured error logging.
+                }
+            },
+            Event::Risk(risk_event) => match risk_event {
+                RiskEvent::RiskAssessment {
+                    token_id, .. // Capture other fields with ..
+                } => {
+                    trace!(
+                        "DBActor: RiskAssessment for {} - Not directly handled by DB.",
                     token_id
                 );
             }
-            Event::Risk(RiskEvent::PositionClosed {
-                token_id,
+                RiskEvent::PositionOpened {
+                    token_id,
+                    position_id,
+                    amount,
+                    price,
+                    timestamp,
+                    ..
+                } => {
+                    info!(
+                        "DBActor: PositionOpened Event - Token ID: {}, External Position ID: {}, Amount: {}, Price: {}, Timestamp: {}",
+                        token_id, position_id, amount, price, timestamp
+                    );
+                    let position_repo = self.repo_factory.position_repository();
+
+                    // Construct the domain::trading::strategy::Position object
+                    let strategy_position_data = StrategyPosition {
+                        token_id: token_id.clone(),
+                        provider_id: token_id.clone(), // Assuming provider_id is token_id for now, or derive appropriately
+                        entry_price: price,
+                        current_price: price,    // Initial current_price is entry_price
+                        highest_price: price,    // Initial highest_price is entry_price
+                        size: amount,
+                        entry_time: timestamp,
+                        unrealized_pnl: 0.0,     // Initial P&L is 0
+                    };
+
+                    match position_repo.record_position_with_trade(
+                        &strategy_position_data, // Pass the constructed position
+                        price,                   // Price for the trade
+                        amount,                  // Size for the trade
+                        timestamp                // Timestamp for the trade
+                    ).await {
+                        Ok(db_position_id) => {
+                            info!(
+                                "DBActor: Successfully recorded position (DB ID: {}) and trade for token {} (External Event ID: {})",
+                                db_position_id, token_id, position_id
+                            );
+                        }
+                        Err(e) => {
+                            error!(
+                                "DBActor: Failed to record position and trade for token {} (External Event ID: {}): {}",
+                                token_id, position_id, e
+                            );
+                        }
+                    }
+                }
+                RiskEvent::PositionClosed {
+                token_id, // This is canonical
                 pnl,
                 timestamp,
                 entry_price,
@@ -820,63 +878,138 @@ impl DatabaseActor {
                 size,
                 entry_time,
                 delete_position,
-            }) => {
-                let position_repo = self.repo_factory.position_repository();
-                warn!("Handling PositionClosed event in DatabaseActor - needs logic to find position ID before recording close trade.");
-                // Fetch position_id based on token_id and is_paper
-                match position_repo.get_position_by_token_id(&token_id).await {
-                    Ok(Some((position_id, _pos))) => {
-                        // Corrected call with 7 arguments (timestamp is used for exit_time)
-                        match position_repo
-                            .record_position_close_with_trade(
-                                position_id,
-                                &token_id,
-                                exit_price,
-                                size,
-                                entry_price,
-                                entry_time,
-                                timestamp,
-                            )
-                            .await
-                        {
-                            Ok(_) => info!(
-                                "Successfully recorded position close for token_id: {}",
-                                token_id
-                            ),
-                            Err(e) => error!(
-                                "Failed to record position close for token_id {}: {}",
-                                token_id, e
-                            ),
+                } => {
+                    info!(
+                        "DBActor: RiskPositionClosed Event - Token ID: {}, PNL: {}, ExitPrice: {}, Size: {}, Delete: {}",
+                        token_id, pnl, exit_price, size, delete_position
+                    );
+                    // We need provider_token_id here. 
+                    // The RiskEvent::PositionClosed event currently only has `token_id` (canonical).
+                    // This is a gap. For now, we might have to use token_id for both, or fetch it.
+                    // Fetching provider_id from the position being closed:
+                    let position_repo = self.repo_factory.position_repository();
+                    let provider_id_for_close = match tokio::runtime::Handle::current().block_on(position_repo.get_provider_id_for_token(&token_id)) {
+                        Ok(Some(pid)) => pid,
+                        Ok(None) => {
+                            error!("DBActor: Could not find provider_id for position {} to close. Using canonical_id as fallback.", token_id);
+                            token_id.clone() // Fallback
+                        },
+                        Err(e) => {
+                             error!("DBActor: Error fetching provider_id for {}: {}. Using canonical_id as fallback.", token_id, e);
+                             token_id.clone() // Fallback
                         }
-                        if delete_position {
-                            // Use delete_open_position_by_id
-                            if let Err(e) =
-                                position_repo.delete_open_position_by_id(position_id).await
-                            {
-                                error!(
-                                    "Failed to delete position {} after closing: {}",
-                                    position_id, e
-                                );
-                            }
-                        }
-                    }
-                    Ok(None) => {
+                    };
+
+                    self.queue_position_close(
+                        token_id.to_string(),
+                        provider_id_for_close, // Pass fetched or fallback provider_id
+                        exit_price,
+                        size,
+                        entry_price,
+                        entry_time,
+                        delete_position,
+                        timestamp
+                    );
+                }
+                RiskEvent::RiskLimitExceeded {
+                    limit_type,
+                    current,
+                    max,
+                    .. // Ensure timestamp is captured by ..
+                } => {
+                    info!(
+                        "DBActor: RiskLimitExceeded: Type {}, Current {}, Max {}",
+                        limit_type, current, max
+                    );
+                }
+                RiskEvent::RiskMetricsUpdate { .. } => { // Capture fields with ..
+                    trace!("DBActor: RiskMetricsUpdate - Not directly handled by DB.");
+                }
+                RiskEvent::InvalidSignalReceived {
+                    token_id, .. // Capture fields with ..
+                } => {
+                    trace!(
+                        "DBActor: InvalidSignalReceived for {} - Not directly handled by DB.",
+                        token_id
+                    );
+                }
+                RiskEvent::StatusCheck => trace!("DBActor: Risk StatusCheck ignored."),
+                RiskEvent::InsufficientFunds {
+                    token_id, .. // Capture fields with ..
+                } => {
+                    trace!(
+                        "DBActor: InsufficientFunds for {} - Not directly handled by DB.",
+                        token_id
+                    );
+                }
+                RiskEvent::TradeSizeAdjusted {
+                    token_id, .. // Capture fields with ..
+                } => {
+                    trace!(
+                        "DBActor: TradeSizeAdjusted for {} - Not directly handled by DB.",
+                        token_id
+                    );
+                }
+                RiskEvent::TradingHalted { token_id, reason, timestamp } => {
                         error!(
-                            "Could not find open position for token_id {} to record closure.",
+                        "DBActor: TradingHalted Event - Token ID: {}, Reason: '{}', Timestamp: {}",
+                        token_id, reason, timestamp
+                    );
+                    // TODO: Future: Consider if this needs to be persisted in a dedicated table or if logging is sufficient.
+                }
+            },
+            Event::Strategy(strategy_event) => match strategy_event {
+                StrategyEvent::Signal {
+                    token_id, .. // Capture other fields with ..
+                } => {
+                    trace!(
+                        "DBActor: StrategySignal for {} - Not directly handled by DB.",
                             token_id
                         );
                     }
-                    Err(e) => {
-                        error!("Failed to query position_id for token {}: {}", token_id, e);
+                StrategyEvent::StatusCheck => trace!("DBActor: Strategy StatusCheck ignored."),
+            },
+            Event::DexTransaction(dex_tx_event) => {
+                match dex_tx_event {
+                    DexTransactionEvent::StatusUpdated { status } => {
+                        if let Err(e) = self.log_dex_transaction_status(&status).await {
+                            error!("DatabaseActor: Failed to log DEX transaction status for tx {:?}: {}", status, e);
+                        }
+                    }
+                    DexTransactionEvent::Submitted { tx_id, .. } => {
+                        trace!("DatabaseActor: Received DexTransactionEvent::Submitted for {}, no action taken.", tx_id);
                     }
                 }
             }
-            // Add handlers for other event types (Strategy, Risk, Database) as needed
-            _ => {
-                trace!("DatabaseActor ignoring event type: {:?}", event);
+            Event::Database(db_event) => {
+                trace!(
+                    "DatabaseActor received self-generated DatabaseEvent: {:?}, ignoring.",
+                    db_event
+                );
             }
         }
         Ok(())
+    }
+
+    async fn touch_last_activity(&mut self) {
+        *self.last_activity_time.lock().unwrap() = Instant::now();
+    }
+
+    async fn process_events_internal(&mut self, mut event_rx: mpsc::Receiver<Event>) {
+        info!("DatabaseActor internal event processing loop starting.");
+        while let Some(event) = event_rx.recv().await {
+            if !self.running || self.shutdown_flag.load(Ordering::Relaxed) {
+                info!("DatabaseActor: Shutting down internal event processor.");
+                break;
+            }
+            if let Err(e) = self.handle_event(event).await {
+                error!(
+                    "DatabaseActor: Error handling event in internal loop: {}",
+                    e
+                );
+            }
+        }
+        info!("DatabaseActor internal event processing loop finished.");
     }
 }
 
@@ -885,62 +1018,97 @@ impl Actor for DatabaseActor {
     fn start(
         &mut self,
     ) -> impl std::future::Future<Output = crate::core::error::Result<()>> + Send {
-        info!("Starting DatabaseActor...");
-        // Clone needed parts for the background task
-        let repo_factory = self.repo_factory.clone();
-        let position_queue = self.position_queue.clone(); // Clone Option<Arc<Queue>>
-        let trade_queue = self.trade_queue.clone(); // Clone Option<Arc<Queue>>
-        let batch_interval_secs = self.config.database.batch_interval_secs; // Get interval from config
-        let config_clone = self.config.clone(); // Clone config for process_batch
+        self.running = true;
+        info!("🚀 DatabaseActor starting...");
+        *self.last_activity_time.lock().unwrap() = Instant::now();
 
-        // Spawn the background task
-        let handle = tokio::spawn(async move {
-            info!(
-                "DatabaseActor background task started (interval: {}s)",
-                batch_interval_secs
-            );
-            let interval = Duration::from_secs(batch_interval_secs);
-            let mut interval_timer = tokio::time::interval(interval);
+        // Start the batch processing task if queues are available
+        if self.position_queue.is_some() || self.trade_queue.is_some() {
+            let repo_factory_clone = self.repo_factory.clone();
+            let position_queue_clone = self.position_queue.clone();
+            let trade_queue_clone = self.trade_queue.clone();
+            let config_clone = self.config.clone();
+            let shutdown_flag_clone = self.shutdown_flag.clone(); // Clone shutdown_flag
 
-            loop {
-                tokio::select! {
-                    _ = interval_timer.tick() => {
-                        if is_forced_shutdown() {
-                            info!("DatabaseActor task detected forced shutdown.");
-                            break;
-                        }
-                        // Process batches asynchronously
-                        // Pass Option<&Queue> by borrowing from the cloned Option<Arc<Queue>>
-                        if let Err(e) = DatabaseActor::process_batch(
-                            &repo_factory,
-                            position_queue.as_deref(), // Pass Option<&PositionUpdateQueue>
-                            trade_queue.as_deref(),   // Pass Option<&TradeOperationQueue>
-                            &config_clone, // Pass reference to cloned Config
-                        ).await {
-                            error!("Error processing database batch: {}", e);
-                        }
+            self.task_handle = Some(tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(
+                    config_clone.database.batch_interval_secs,
+                ));
+                while !shutdown_flag_clone.load(Ordering::Relaxed) {
+                    // Check shutdown_flag
+                    interval.tick().await;
+                    if crate::domain::trading::execution::bot::is_forced_shutdown()
+                        || shutdown_flag_clone.load(Ordering::Relaxed)
+                    {
+                        info!("DatabaseActor batch processing task shutting down due to signal.");
+                        break;
                     }
-                    // TODO: Add shutdown signal channel if needed
-                }
-            }
-            info!("DatabaseActor background task finished.");
-        });
 
-        self.task_handle = Some(handle);
-        info!("DatabaseActor started and background task spawned.");
-        // Since start is not async, return an immediate future
-        async { Ok(()) }
+                    debug!("DatabaseActor: Running batch processing task...");
+                    match Self::process_batch(
+                        &repo_factory_clone,
+                        position_queue_clone.as_deref(),
+                        trade_queue_clone.as_deref(),
+                        &config_clone,
+                    )
+                    .await
+                    {
+                        Ok(_) => debug!("Database batch processed successfully."),
+                        Err(e) => error!("Error processing database batch: {}", e),
+                    }
+                }
+                info!("DatabaseActor batch processing task stopped.");
+            }));
+        }
+
+        let mut self_clone = self.clone();
+        let event_tx_for_subscription = self.event_sender.clone(); // Use the actor's own sender
+
+        async move {
+            // Subscribe to DexTransactionEvents
+            if let Err(e) = self_clone
+                .message_bus
+                .subscribe(
+                    format!("{:?}", EventType::DexTransaction), // Ensure EventType can be formatted
+                    event_tx_for_subscription.clone(),
+                )
+                .await
+            {
+                error!(
+                    "DatabaseActor failed to subscribe to DexTransaction events: {}",
+                    e
+                );
+                // Depending on policy, may want to return Err(e) here
+            } else {
+                info!("DatabaseActor subscribed to DexTransaction events.");
+            }
+
+            // Start the main event processing loop using the actor's own receiver
+            if let Some(event_rx_for_loop) = self_clone.event_receiver.take() {
+                self_clone.process_events_internal(event_rx_for_loop).await;
+            } else {
+                error!(
+                    "DatabaseActor event receiver was already taken. Cannot start main event loop."
+                );
+                return Err(Error::Internal("Event receiver unavailable".to_string()));
+            }
+
+            info!("DatabaseActor started successfully.");
+            Ok(())
+        }
     }
 
-    fn stop(&mut self) -> Result<()> {
+    fn stop(&mut self) -> crate::core::error::Result<()> {
         info!("Stopping DatabaseActor...");
-        if let Some(handle) = self.task_handle.take() {
-            handle.abort();
-            info!("DatabaseActor background task signalled to abort.");
-            // Note: We don't await the handle here as stop is synchronous.
-        } else {
-            warn!("DatabaseActor stop called but no task handle found.");
+        self.running = false;
+        self.shutdown_flag.store(true, Ordering::Relaxed); // Signal background tasks to stop
+        if let Some(_handle) = self.task_handle.take() {
+            // Don't abort directly, let the task observe shutdown_flag
+            info!("DatabaseActor background task was running, should stop soon.");
+            // Optionally, can add a timed join here if synchronous stop is critical
+            // tokio::spawn(async move { handle.await });
         }
+        info!("DatabaseActor stopped.");
         Ok(())
     }
 
@@ -948,51 +1116,78 @@ impl Actor for DatabaseActor {
         &mut self,
         msg: Message,
     ) -> impl std::future::Future<Output = crate::core::error::Result<()>> + Send {
-        trace!("DatabaseActor received message: {:?}", msg);
-        // Clone self FOR the async block
-        let self_clone = self.clone();
-        // Wrap the message handling logic in an async block
+        let mut self_clone = self.clone();
         async move {
+            self_clone.touch_last_activity().await;
+            trace!("DatabaseActor received message: {:?}", msg);
             match msg {
                 Message::Event(event) => {
-                    if let Err(e) = self_clone.handle_event(event).await {
-                        error!("Error handling event in DatabaseActor: {}", e);
+                    // Send event to the internal mpsc channel for processing by process_events_internal
+                    if let Err(e) = self_clone.event_sender.send(event).await {
+                        error!(
+                            "Failed to send event to internal DatabaseActor channel: {}",
+                            e
+                        );
                     }
                 }
-                Message::Query(Query::GetStatus, responder) => {
-                    let status = QueryResult::Status("Running".to_string());
-                    let _ = responder
-                        .send(Ok(status))
-                        .map_err(|_| error!("Failed to send response for GetStatus query"));
-                }
-                Message::Query(Query::GetMetrics, responder) => {
-                    let metrics = self_clone.gather_metrics().await;
-                    let _ = responder
-                        .send(Ok(QueryResult::Metrics(metrics)))
-                        .map_err(|_| error!("Failed to send response for GetMetrics query"));
-                }
-                Message::Query(Query::GetMaintenanceStatus, responder) => {
-                    let (last_run, next_run) = self_clone.get_maintenance_status();
-                    let result = Ok(QueryResult::MaintenanceStatus { last_run, next_run });
-                    let _ = responder.send(result).map_err(|_| {
-                        error!("Failed to send response for GetMaintenanceStatus query")
-                    });
-                }
-                Message::Query(query, responder) => {
-                    warn!("DatabaseActor received unhandled query: {:?}", query);
-                    let _ = responder.send(Err(Error::NotImplemented(format!(
-                        "Query {:?} not handled",
-                        query
-                    ))));
-                }
+                Message::Query(query, responder) => match query {
+                    Query::GetStatus => {
+                        let status_msg = format!(
+                            "Running: {}, Last Activity: {:?}s ago, Pending Pos: {}, Pending Trades: {}",
+                            self_clone.running,
+                            self_clone.last_activity_time.lock().unwrap().elapsed().as_secs(),
+                            "N/A", // Placeholder for position queue length
+                            "N/A"  // Placeholder for trade queue length
+                        );
+                        let status = QueryResult::Status(status_msg);
+                        if responder.send(Ok(status)).is_err() {
+                            error!("Failed to send response for GetStatus query");
+                        }
+                    }
+                    Query::GetMetrics => {
+                        let metrics = self_clone.gather_metrics().await;
+                        if responder.send(Ok(QueryResult::Metrics(metrics))).is_err() {
+                            error!("Failed to send response for GetMetrics query");
+                        }
+                    }
+                    Query::GetMaintenanceStatus => {
+                        let (last_run, next_run) = self_clone.get_maintenance_status();
+                        let result = Ok(QueryResult::MaintenanceStatus { last_run, next_run });
+                        if responder.send(result).is_err() {
+                            error!("Failed to send response for GetMaintenanceStatus query");
+                        }
+                    }
+                    _ => {
+                        // Catch-all for other unhandled queries
+                        warn!("DatabaseActor received unhandled query: {:?}", query);
+                        if responder
+                            .send(Err(Error::NotImplemented(format!(
+                                "Query {:?} not handled by DatabaseActor",
+                                query
+                            ))))
+                            .is_err()
+                        {
+                            error!("Failed to send error for unhandled query");
+                        }
+                    }
+                },
                 Message::Command(Command::MaintenanceDb) => {
-                    info!("Received MaintenanceDb command.");
+                    info!("Received MaintenanceDb command. Scheduling maintenance.");
                     let maint_self = self_clone.clone();
                     tokio::spawn(async move {
                         if let Err(e) = maint_self.run_maintenance_now().await {
                             error!("Manual database maintenance failed: {}", e);
                         }
                     });
+                }
+                Message::Command(Command::StartMaintenanceScheduler) => {
+                    info!("Received StartMaintenanceScheduler command.");
+                    // if self_clone.maintenance_task_handle.is_none() { // Temporarily comment out if problematic
+                    //     self_clone.start_maintenance_scheduler_task().await;
+                    // } else {
+                    //     info!("Maintenance scheduler already running.");
+                    // }
+                    warn!("StartMaintenanceScheduler command is currently a no-op pending review of maintenance_task_handle.");
                 }
                 Message::Command(cmd) => {
                     warn!("DatabaseActor received unhandled command: {:?}", cmd);
