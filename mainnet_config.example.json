@@ -1,0 +1,74 @@
+{
+  "api_keys": {
+    "infura": null,
+    "alchemy": "YOUR_ALCHEMY_API_KEY_HERE"
+  },
+  "trading": {
+    "live_trading": false,
+    "max_position_size": 200.0,
+    "min_position_size": 100.0,
+    "max_total_exposure": 1000.0,
+    "strategy": "momentum",
+    "signal_confidence_threshold": 0.5,
+    "min_volume": 50000.0,
+    "min_liquidity": 100000.0,
+    "min_pool_transaction_count": 10000,
+    "stop_loss": 4.0,
+    "take_profit": 4.0,
+    "max_positions": 10,
+    "risk_tolerance": 5,
+    "rsi_weight": 0.3,
+    "macd_weight": 0.3,
+    "bollinger_weight": 0.2,
+    "volume_weight": 0.2,
+    "indicator_profile": "swing_trading",
+    "max_tokens_to_scan": 200,
+    "max_daily_loss": 50.0,
+    "max_drawdown": 30.0,
+    "max_trade_risk_pct": 20.0,
+    "max_volatility_24h": 30.0,
+    "min_eth_balance": 0.1,
+    "tokens_to_track": [],
+    "market_data_provider": "alchemy",
+    "max_gas_cost_usd": 8.0,
+    "max_gas_cost_percentage": 8.0,
+    "transaction_priority": "Standard",
+    "max_execution_price_deviation": 0.05,
+    "min_portfolio_risk_factor": 0.5
+  },
+  "database": {
+    "host": "localhost",
+    "port": 5432,
+    "user": "mantis",
+    "password": null,
+    "dbname": "mantis",
+    "pool_max_size": 50
+  },
+  "api": {},
+  "data_collection": {
+    "scan_interval_secs": 120,
+    "history_days": 30,
+    "auto_start": true
+  },
+  "logs": {
+    "directory": "./logs"
+  },
+  "rpc": {
+    "primary_provider": "alchemy"
+  },
+  "dex": {
+    "network": "ethereum",
+    "protocol": "uniswap_v3",
+    "subgraph_url": "YOUR_SATSUMA_SUBGRAPH_URL_HERE",
+    "custom_rpc_url": null,
+    "router_address": null,
+    "weth_address": null,
+    "stablecoin_address": null,
+    "wallet": null,
+    "paper_simulated_weth_balance": 10.0
+  },
+  "cache": {
+    "enabled": false,
+    "redis_url": "redis://127.0.0.1/"
+  }
+}

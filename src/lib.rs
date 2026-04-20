@@ -1,18 +1,37 @@
-// Core modules
-pub mod cli;
-pub mod core;
-pub mod domain;
-pub mod infra;
-pub mod utils;
+// Unified error types for all layers
+pub mod errors;
 
-// Re-export Error type for backward compatibility
-pub use core::error::Error;
+// Layered Architecture Modules
+pub mod core; // Domain models and business logic
+pub mod infrastructure; // External integrations (database, network, DEX, cache)
+
+// Application layer is in application/src/
+#[path = "application/src/mod.rs"]
+pub mod application; // Application services and actors
+
+// CLI layer modules
+#[path = "bin/cli/src/mod.rs"]
+pub mod cli; // CLI commands and handlers
+
+#[path = "bin/cli/src/config/mod.rs"]
+pub mod config; // Configuration management
+
+#[path = "bin/cli/src/errors.rs"]
+pub mod error; // CLI errors (re-exports unified Error)
+
+#[path = "bin/cli/src/bootstrap.rs"]
+pub mod bootstrap; // Bootstrap utilities
+
+// Re-export unified error type and Result
+pub use errors::{Error, Result};
+
+// Re-export commonly used modules
+pub use application::actors::EventRouter;
+pub use application::events;
 
 // Initialize logger with default settings
 pub fn init_logger() {
-    // For backward compatibility, use default stdout logging
-    // This is mainly for integration tests or simple usage
-    let _ = utils::logging::init_logger(
+    let _ = infrastructure::logging::init_logger(
         Some("info"), // Default log level
         false,        // Debug mode off
         None,         // No log file
@@ -21,29 +40,3 @@ pub fn init_logger() {
         None,         // No module filters
     );
 }
-
-// Re-exports for backward compatibility
-// These help maintain existing code that imports from the old structure
-pub use core::config;
-pub use core::error;
-pub use core::models as types;
-
-pub use cli::display;
-
-pub use domain::dex;
-pub use domain::market;
-pub use domain::trading;
-pub use domain::wallet;
-
-pub use infra::actors;
-pub use infra::api;
-pub use infra::cache;
-pub use infra::collector as data;
-pub use infra::db;
-pub use infra::db::repositories;
-
-// Re-export commonly used types and functions
-pub use infra::api::market::get_market_overview;
-pub use infra::api::news::get_token_news;
-pub use infra::api::wallet::get_wallet_info;
-pub use infra::api::{get_dex_pair, get_dex_stats};

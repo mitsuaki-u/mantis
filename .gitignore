@@ -33,3 +33,15 @@
 
 # Ignore generated docs
 /target/doc/
+
+# Local config files (may contain secrets)
+mainnet_config.json
+local_notes.md
+*.local.json
+.env
+.env.*
+!.env.example
+
+# Runtime logs
+/logs/
+
