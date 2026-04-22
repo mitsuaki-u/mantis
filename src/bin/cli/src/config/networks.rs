@@ -147,7 +147,7 @@ impl NetworkConfig {
             Some("optimism") | Some("op") => "optimism".to_string(),
             Some("arbitrum") | Some("arbitrum-one") | Some("arb") => "arbitrum".to_string(),
             Some(other) => other.to_string(),
-            None => "ethereum".to_string(), // Default to Ethereum
+            None => "solana".to_string(),
         }
     }
 
@@ -243,7 +243,7 @@ mod tests {
             NetworkConfig::normalize_network_name(Some(&"polygon".to_string())),
             "polygon"
         );
-        assert_eq!(NetworkConfig::normalize_network_name(None), "ethereum");
+        assert_eq!(NetworkConfig::normalize_network_name(None), "solana");
     }
 
     #[test]

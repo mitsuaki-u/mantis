@@ -69,6 +69,14 @@ pub struct Config {
     #[serde(default)]
     #[validate]
     pub cache: CacheConfig,
+
+    /// Solana configuration
+    #[serde(default)]
+    pub solana: SolanaConfig,
+
+    /// Anthropic API key for AI advisor
+    #[serde(default)]
+    pub anthropic_api_key: Option<String>,
 }
 
 /// Trading bot configuration
@@ -228,9 +236,9 @@ pub struct TradingConfig {
     pub max_trade_risk_pct: f64,
 
     /// Minimum required ETH balance for trading (must be positive)
-    #[serde(default = "default_min_required_eth_balance_for_trading")]
-    #[validate(range(min = 0.0, message = "Minimum ETH balance must be non-negative"))]
-    pub min_eth_balance: f64,
+    #[serde(default = "default_min_required_eth_balance_for_trading", alias = "min_eth_balance")]
+    #[validate(range(min = 0.0, message = "Minimum native token balance must be non-negative"))]
+    pub min_native_balance: f64,
 
     /// List of specific tokens to track (empty means use defaults)
     #[serde(default = "default_tokens_to_track")]
@@ -383,15 +391,22 @@ pub struct DexConfig {
     #[serde(default = "default_paper_simulated_weth_balance")]
     pub paper_simulated_weth_balance: f64,
 
-    /// Uniswap V3 subgraph URL (required for token discovery).
-    /// e.g. https://gateway.thegraph.com/api/subgraphs/id/SUBGRAPH_ID
-    #[serde(default)]
-    pub subgraph_url: Option<String>,
+}
 
-    /// API key sent as Authorization: Bearer header with subgraph requests.
-    /// Required for The Graph's decentralized network.
-    #[serde(default)]
-    pub subgraph_api_key: Option<String>,
+/// Solana network configuration
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SolanaConfig {
+    /// Helius or other Solana RPC URL
+    pub rpc_url: Option<String>,
+    /// Network: "mainnet", "devnet"
+    #[serde(default = "default_solana_network")]
+    pub network: String,
+    /// Path to keypair JSON file for live trading
+    pub keypair_path: Option<String>,
+}
+
+fn default_solana_network() -> String {
+    "mainnet".to_string()
 }
 
 /// Wallet configuration
@@ -493,7 +508,7 @@ impl Default for TradingConfig {
             max_daily_loss: default_max_daily_loss_config(),
             max_drawdown: default_max_drawdown_config(),
             max_trade_risk_pct: default_max_single_trade_risk_percentage_of_wallet(),
-            min_eth_balance: default_min_required_eth_balance_for_trading(),
+            min_native_balance: default_min_required_eth_balance_for_trading(),
             tokens_to_track: default_tokens_to_track(),
             market_data_provider: default_market_data_provider(),
             min_liquidity: default_min_liquidity(),
@@ -541,16 +556,14 @@ impl Default for LogsConfig {
 impl Default for DexConfig {
     fn default() -> Self {
         Self {
-            network: Some("ethereum".to_string()),
-            protocol: default_protocol_v3(),
+            network: Some("solana".to_string()),
+            protocol: "jupiter".to_string(),
             custom_rpc_url: None,
             router_address: None,
             weth_address: None,
             stablecoin_address: None,
             wallet: None,
             paper_simulated_weth_balance: default_paper_simulated_weth_balance(),
-            subgraph_url: None,
-            subgraph_api_key: None,
         }
     }
 }
@@ -658,14 +671,21 @@ impl DexConfig {
         .await
     }
 
-    /// Get base token address for trading (always WETH)
+    /// Get base token address for trading (WETH on Ethereum, SOL on Solana)
     pub fn base_token_address(&self) -> String {
-        NetworkConfig::weth_address(self.network.as_ref(), self.weth_address.as_ref())
+        match self.network.as_deref() {
+            Some("solana") => "So11111111111111111111111111111111111111112".to_string(),
+            _ => NetworkConfig::weth_address(self.network.as_ref(), self.weth_address.as_ref()),
+        }
     }
 
-    /// Get base token symbol (always "WETH")
+    /// Get base token symbol (SOL on Solana, WETH on Ethereum)
     pub fn base_token_symbol(&self) -> &'static str {
-        "WETH"
+        match self.network.as_deref() {
+            Some("solana") => "SOL",
+            Some("polygon") | Some("matic") => "WMATIC",
+            _ => "WETH",
+        }
     }
 }
 

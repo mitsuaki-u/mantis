@@ -103,7 +103,7 @@ pub async fn handle_show(show_secrets: bool, json: bool) -> Result<()> {
     );
     println!(
         "  Min Required ETH Balance: {}{}",
-        format!("${:.2}", config.trading.min_eth_balance).cyan(),
+        format!("${:.2}", config.trading.min_native_balance).cyan(),
         " USD".dimmed()
     );
     println!(

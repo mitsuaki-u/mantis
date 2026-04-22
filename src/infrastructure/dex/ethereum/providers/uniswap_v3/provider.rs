@@ -245,18 +245,18 @@ impl UniswapV3ProtocolProvider {
                 .await
                 .map_err(|e| Error::Wallet(format!("Failed to get ETH balance: {}", e)))?;
 
-            let min_eth_required = self.trading_config.min_eth_balance;
+            let min_native_required = self.trading_config.min_native_balance;
 
-            if eth_balance < min_eth_required {
+            if eth_balance < min_native_required {
                 return Err(Error::Trading(format!(
                     "Insufficient ETH balance for gas: {:.6} ETH < {:.6} ETH minimum",
-                    eth_balance, min_eth_required
+                    eth_balance, min_native_required
                 )));
             }
 
             info!(
                 "✅ ETH balance check passed: {:.6} ETH >= {:.6} ETH minimum",
-                eth_balance, min_eth_required
+                eth_balance, min_native_required
             );
         }
 

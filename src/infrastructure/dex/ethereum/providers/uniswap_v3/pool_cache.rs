@@ -1,8 +1,7 @@
 //! Pool caching and selection logic for Uniswap V3
 
-use super::types::{format_address, PoolInfo, V3FeeTier};
+use super::types::{format_address, PoolInfo, UniswapV3Pool, V3FeeTier};
 use crate::infrastructure::errors::{Error, Result};
-use crate::infrastructure::market::providers::alchemy::UniswapV3Pool;
 use ethers::types::{Address, U256};
 use log::{debug, info, warn};
 use std::collections::HashMap;
@@ -155,13 +154,13 @@ impl PoolCache {
             .into_iter()
             .map(|data| UniswapV3Pool {
                 id: data.pool_address,
-                token0: crate::infrastructure::market::providers::alchemy::V3Token {
+                token0: super::types::V3Token {
                     id: data.token0_address,
                     symbol: data.token0_symbol,
                     name: data.token0_name,
                     decimals: data.token0_decimals,
                 },
-                token1: crate::infrastructure::market::providers::alchemy::V3Token {
+                token1: super::types::V3Token {
                     id: data.token1_address,
                     symbol: data.token1_symbol,
                     name: data.token1_name,

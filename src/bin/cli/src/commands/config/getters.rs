@@ -60,7 +60,7 @@ pub async fn handle_get(key: String) -> Result<()> {
                     config.trading.max_trade_risk_pct.to_string()
                 }
                 "min_required_eth_balance_for_trading" => {
-                    config.trading.min_eth_balance.to_string()
+                    config.trading.min_native_balance.to_string()
                 }
                 "tokens_to_track" => serde_json::to_string(&config.trading.tokens_to_track)
                     .unwrap_or_else(|_| "[]".to_string()),
@@ -135,8 +135,7 @@ pub async fn handle_get(key: String) -> Result<()> {
                     .to_string(),
                 "weth_address" => config.dex.weth_address.as_deref().unwrap_or("Not set").to_string(),
                 "stablecoin_address" => config.dex.stablecoin_address.as_deref().unwrap_or("Not set").to_string(),
-                "subgraph_url" => config.dex.subgraph_url.as_deref().unwrap_or("Not set").to_string(),
-                "subgraph_api_key" => config.dex.subgraph_api_key.as_deref().unwrap_or("Not set").to_string(),
+
                 "wallet" => {
                     // Handle nested wallet parameters like dex.wallet.private_key_env
                     if parts.len() < 3 {
@@ -170,7 +169,7 @@ pub async fn handle_get(key: String) -> Result<()> {
                 }
                 _ => {
                     return Err(Error::Config(format!(
-                    "Unknown DEX parameter: {}. Supported: network, protocol, custom_rpc_url, router_address, weth_address, stablecoin_address, subgraph_url, wallet",
+                    "Unknown DEX parameter: {}. Supported: network, protocol, custom_rpc_url, router_address, weth_address, stablecoin_address, wallet",
                     parts[1]
                 )))
                 }

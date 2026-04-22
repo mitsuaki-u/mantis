@@ -65,7 +65,7 @@ simple_default!(default_protocol_v3, String, "uniswap_v3".to_string());
 simple_default!(
     default_market_data_provider,
     String,
-    "alchemy_uniswap_v3".to_string()
+    "dexscreener_solana".to_string()
 );
 simple_default!(default_primary_rpc_provider, String, "alchemy".to_string());
 

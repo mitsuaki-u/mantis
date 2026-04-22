@@ -215,7 +215,7 @@ mod tests {
             price_change_24h: 0.0,
             volume_24h: 10000.0,
             decimals: 18,
-            chain: Some("ethereum".to_string()),
+            chain: Some("solana".to_string()),
             last_updated: Utc::now(),
         }
     }

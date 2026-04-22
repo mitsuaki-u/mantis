@@ -138,7 +138,7 @@ pub async fn handle_set(key: String, value_str: String) -> Result<()> {
                     })?;
                 }
                 "min_required_eth_balance_for_trading" => {
-                    config.trading.min_eth_balance = value_str.parse().map_err(|e| {
+                    config.trading.min_native_balance = value_str.parse().map_err(|e| {
                         Error::Config(format!(
                             "Invalid min required ETH balance for trading: {}",
                             e
@@ -162,7 +162,7 @@ pub async fn handle_set(key: String, value_str: String) -> Result<()> {
                 }
                 "market_data_provider" => {
                     // Validate market data provider
-                    let valid_providers = ["alchemy_uniswap_v3"];
+                    let valid_providers = ["dexscreener_solana"];
                     if !valid_providers.contains(&value_str.as_str()) {
                         return Err(Error::Config(format!(
                             "Invalid market data provider: {}. Valid values: {}",
@@ -306,8 +306,7 @@ pub async fn handle_set(key: String, value_str: String) -> Result<()> {
                 "router_address" => config.dex.router_address = Some(value_str.clone()),
                 "weth_address" => config.dex.weth_address = Some(value_str.clone()),
                 "stablecoin_address" => config.dex.stablecoin_address = Some(value_str.clone()),
-                "subgraph_url" => config.dex.subgraph_url = Some(value_str.clone()),
-                "subgraph_api_key" => config.dex.subgraph_api_key = Some(value_str.clone()),
+
                 "wallet" => {
                     // Handle nested wallet parameters like dex.wallet.private_key_env
                     if parts.len() < 3 {
@@ -353,7 +352,7 @@ pub async fn handle_set(key: String, value_str: String) -> Result<()> {
                 }
                 _ => {
                     return Err(Error::Config(format!(
-                    "Unknown DEX parameter: {}. Supported: network, protocol, custom_rpc_url, router_address, weth_address, stablecoin_address, subgraph_url, wallet",
+                    "Unknown DEX parameter: {}. Supported: network, protocol, custom_rpc_url, router_address, weth_address, stablecoin_address, wallet",
                     parts[1]
                 )))
                 }

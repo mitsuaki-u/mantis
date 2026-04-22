@@ -115,9 +115,14 @@ pub async fn start_trading(
 
         // Trading Mode
         println!("│ {:<W$} │", "── TRADING MODE", W = W);
+        let is_solana = network_name == "solana";
         if is_paper_trading {
             row("Mode:", "📝 Paper Trading (simulation)");
-            row("Balance:", "10 WETH (simulated)");
+            if is_solana {
+                row("Balance:", "10 SOL (simulated)");
+            } else {
+                row("Balance:", "10 WETH (simulated)");
+            }
             row("Risk:", "No real funds at risk");
         } else {
             row("Mode:", "💰 LIVE TRADING (real money)");
@@ -125,7 +130,11 @@ pub async fn start_trading(
             row("Risk:", "Capital is at risk of loss");
         }
         row("Network:", &network_name);
-        row("Protocol:", &protocol_name);
+        if is_solana {
+            row("DEX:", "Jupiter (via DexScreener discovery)");
+        } else {
+            row("Protocol:", &protocol_name);
+        }
 
         println!("├{}┤", "─".repeat(W + 2));
 

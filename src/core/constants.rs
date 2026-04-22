@@ -495,8 +495,9 @@ pub const MIN_RISK_ADJUSTED_CONFIDENCE: f64 = 0.4;
 /// Default maximum single trade risk as percentage of wallet
 pub const DEFAULT_MAX_TRADE_RISK_PCT: f64 = 5.0;
 
-/// Default minimum required ETH balance for trading
-pub const DEFAULT_MIN_ETH_BALANCE: f64 = 0.1;
+/// Default minimum required native token balance for trading (SOL on Solana, ETH on Ethereum)
+pub const DEFAULT_MIN_ETH_BALANCE: f64 = 0.1; // kept for serde compat
+pub const DEFAULT_MIN_NATIVE_BALANCE: f64 = 0.1;
 
 // ============================================================================
 // RISK SCORES

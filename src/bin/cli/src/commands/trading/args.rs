@@ -61,8 +61,8 @@ pub struct StartArgs {
     /// Volume trend indicator weight (0-1)
     #[arg(long)]
     pub volume_weight: Option<f64>,
-    /// Market data provider (alchemy_uniswap_v3)
-    #[arg(long, value_parser = ["alchemy_uniswap_v3"])]
+    /// Market data provider (dexscreener_solana)
+    #[arg(long, value_parser = ["dexscreener_solana"])]
     pub market_data_provider: Option<String>,
 }
 

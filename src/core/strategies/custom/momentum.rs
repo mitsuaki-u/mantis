@@ -83,7 +83,7 @@ impl TradingStrategy for MomentumStrategy {
     fn analyze_for_entry(&self, token: &TokenMetrics) -> bool {
         if token.symbol.is_empty() {
             debug!(
-                "❌ Skipping token {} - empty symbol (subgraph data quality issue)",
+                "❌ Skipping token {} - empty symbol (data quality issue)",
                 &token.id[..10]
             );
             return false;

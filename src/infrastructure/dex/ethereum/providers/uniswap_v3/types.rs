@@ -2,6 +2,34 @@
 
 use crate::infrastructure::dex::TransactionPriority;
 use ethers::types::{Address, U256};
+use serde::{Deserialize, Serialize};
+
+/// Pool data from market data providers (used for pool cache population)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UniswapV3Pool {
+    pub id: String,
+    pub token0: V3Token,
+    pub token1: V3Token,
+    #[serde(rename = "feeTier")]
+    pub fee_tier: String,
+    pub liquidity: String,
+    #[serde(rename = "sqrtPrice")]
+    pub sqrt_price: String,
+    #[serde(rename = "volumeUSD")]
+    pub volume_usd: String,
+    #[serde(rename = "totalValueLockedUSD")]
+    pub tvl_usd: String,
+    pub tick: Option<String>,
+}
+
+/// Token data within a V3 pool
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct V3Token {
+    pub id: String,
+    pub symbol: String,
+    pub name: String,
+    pub decimals: String,
+}
 
 /// Uniswap V3 fee tiers in basis points
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

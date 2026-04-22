@@ -97,6 +97,13 @@ impl StrategyActor {
         token_id: &str,
         token_metrics: &mut TokenMetrics,
     ) -> Result<f64, Error> {
+        // On-chain price validation only applies to Ethereum (0x addresses).
+        // Solana tokens use base58 addresses — skip the Ethereum registry check.
+        let is_solana = !token_id.starts_with("0x");
+        if is_solana {
+            return Ok(token_metrics.price_usd);
+        }
+
         // Get on-chain price for the token
         let onchain_price_result = self.dex_client.get_token_price_usd(token_id).await;
 

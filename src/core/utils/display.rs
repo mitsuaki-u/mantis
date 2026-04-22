@@ -257,7 +257,7 @@ pub async fn display_transactions(
             _ => "❓",
         };
 
-        let gas_cost = tx
+        let fee_cost = tx
             .network_fee_usd
             .map(|cost| format!("${:.2}", cost))
             .unwrap_or_else(|| "N/A".to_string());
@@ -273,7 +273,7 @@ pub async fn display_transactions(
             tx.current_status,
             truncate_address(&tx.token_in_address),
             truncate_address(&tx.token_out_address),
-            gas_cost,
+            fee_cost,
             amount,
             time_str
         );
@@ -305,13 +305,13 @@ pub async fn display_transactions(
     println!("   ❌ Failed: {}", failed_count);
     println!("   ⏳ Pending: {}", pending_count);
 
-    let total_gas_cost: f64 = filtered_transactions
+    let total_fees: f64 = filtered_transactions
         .iter()
         .filter_map(|tx| tx.network_fee_usd)
         .sum();
 
-    if total_gas_cost > 0.0 {
-        println!("   ⛽ Total gas cost: ${:.2}", total_gas_cost);
+    if total_fees > 0.0 {
+        println!("   💸 Total fees: ${:.2}", total_fees);
     }
 
     Ok(())
