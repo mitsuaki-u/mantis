@@ -3,7 +3,7 @@ pub mod errors;
 
 // Layered Architecture Modules
 pub mod core; // Domain models and business logic
-pub mod infrastructure; // External integrations (database, network, DEX, cache)
+pub mod infrastructure; // External integrations (database, network, DEX, cache, AI)
 
 // Application layer is in application/src/
 #[path = "application/src/mod.rs"]

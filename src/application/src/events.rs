@@ -8,9 +8,23 @@ use crate::infrastructure::dex::{TransactionPriority, TransactionStatus};
 pub enum Event {
     Market(MarketEvent),
     Strategy(StrategyEvent),
+    AIAdvisor(AIAdvisorEvent),
     Risk(RiskEvent),
     Execution(ExecutionEvent),
     DexTransaction(Box<DexTransactionEvent>),
+}
+
+/// AI Advisor events — emitted after Claude analyses a signal
+#[derive(Debug, Clone)]
+pub enum AIAdvisorEvent {
+    SignalAnalysed {
+        token_id: String,
+        signal: crate::core::domain::trading::Signal,
+        approved: bool,
+        confidence: u8,
+        reasoning: String,
+        metadata: crate::core::domain::trading::SignalMetadata,
+    },
 }
 
 /// Market-related events
@@ -195,6 +209,7 @@ pub struct SubmittedTransactionInfo {
 pub enum EventType {
     Market,
     Strategy,
+    AIAdvisor,
     Risk,
     Execution,
     DexTransaction,

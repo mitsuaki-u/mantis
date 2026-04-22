@@ -2,7 +2,7 @@ use super::{limits, operations, RiskManagerActor};
 use crate::application::errors::Result;
 use crate::core::domain::token::TokenData;
 use crate::core::domain::trading::Signal;
-use crate::events::{Event, ExecutionEvent, MarketEvent, RiskEvent, StrategyEvent};
+use crate::events::{AIAdvisorEvent, Event, ExecutionEvent, MarketEvent, RiskEvent, StrategyEvent};
 use chrono::Utc;
 use log::{debug, error, info, warn};
 
@@ -13,6 +13,7 @@ pub async fn handle_event_internal(actor: &mut RiskManagerActor, event: Event) -
         Event::Strategy(strategy_event) => handle_strategy_event(actor, strategy_event).await,
         Event::Risk(risk_event) => handle_risk_event(actor, risk_event).await,
         Event::Execution(execution_event) => handle_execution_event(actor, execution_event).await,
+        Event::AIAdvisor(ai_event) => handle_ai_advisor_event(actor, ai_event).await,
         Event::DexTransaction(_) => Ok(()), // ExecutionActor handles transaction lifecycle
     }
 }
@@ -106,6 +107,35 @@ async fn handle_market_anomaly(
 }
 
 // ============================================================================
+// AI Advisor Events
+// ============================================================================
+
+async fn handle_ai_advisor_event(actor: &mut RiskManagerActor, event: AIAdvisorEvent) -> Result<()> {
+    match event {
+        AIAdvisorEvent::SignalAnalysed { token_id, signal, approved, confidence, reasoning, metadata } => {
+            if approved {
+                debug!(
+                    "RiskManager: received AI-approved signal for {} ({}% confidence) — {}",
+                    &token_id[..token_id.len().min(10)], confidence, reasoning
+                );
+                // Route the approved signal through the same path as a normal strategy signal
+                handle_strategy_event(actor, StrategyEvent::Signal {
+                    token_id,
+                    signal,
+                    timestamp: Utc::now(),
+                    metadata,
+                }).await
+            } else {
+                debug!(
+                    "RiskManager: AI-rejected signal for {} skipped — {}",
+                    &token_id[..token_id.len().min(10)], reasoning
+                );
+                Ok(())
+            }
+        }
+    }
+}
+
 // Strategy Events
 // ============================================================================
 

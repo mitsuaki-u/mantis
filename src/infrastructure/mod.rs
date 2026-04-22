@@ -1,4 +1,5 @@
 // Infrastructure layer modules
+pub mod ai;
 pub mod cache;
 pub mod constants;
 pub mod database;

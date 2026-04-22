@@ -1,3 +1,4 @@
+pub mod ai_advisor;
 pub mod database;
 pub mod execution;
 pub mod market;
@@ -10,6 +11,7 @@ pub mod system;
 pub use system::*;
 
 // Re-export actors
+pub use ai_advisor::AIAdvisorActor;
 pub use database::DatabaseActor;
 pub use execution::ExecutionActor;
 pub use market::MarketDataActor;

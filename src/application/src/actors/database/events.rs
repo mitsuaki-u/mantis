@@ -15,6 +15,7 @@ pub async fn handle_event_internal(actor: &mut DatabaseActor, event: Event) -> R
         Event::Execution(execution_event) => handle_execution_event(actor, execution_event).await,
         Event::Risk(risk_event) => handle_risk_event(actor, risk_event).await,
         Event::Strategy(strategy_event) => handle_strategy_event(actor, strategy_event).await,
+        Event::AIAdvisor(_) => Ok(()), // DatabaseActor does not persist AI decisions yet
         Event::DexTransaction(dex_event) => handle_dex_transaction_event(actor, *dex_event).await,
     }
 }

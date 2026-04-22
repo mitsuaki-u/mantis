@@ -386,9 +386,12 @@ pub async fn handle_set(key: String, value_str: String) -> Result<()> {
                 }
             }
         }
+        "anthropic_api_key" => {
+            config.anthropic_api_key = Some(value_str.clone());
+        }
         _ => {
             return Err(Error::Config(format!(
-                "Unknown configuration section: {}",
+                "Unknown configuration section: {}. Try: trading, dex, rpc, data_collection, anthropic_api_key",
                 parts[0]
             )))
         }

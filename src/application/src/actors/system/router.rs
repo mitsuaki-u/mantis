@@ -38,8 +38,12 @@ impl EventRouter {
             vec!["strategy", "risk", "database", "execution"],
         );
 
-        // Strategy events → risk, database
-        routes.insert(EventType::Strategy, vec!["risk", "database"]);
+        // Strategy events → ai_advisor (intercepts BUY signals), database
+        // ai_advisor re-emits approved signals back as Strategy events → risk
+        routes.insert(EventType::Strategy, vec!["ai_advisor", "database"]);
+
+        // AIAdvisor events → risk (approved signals forwarded here), database
+        routes.insert(EventType::AIAdvisor, vec!["risk", "database"]);
 
         // Risk events → execution, database
         routes.insert(EventType::Risk, vec!["execution", "database"]);
@@ -166,6 +170,7 @@ impl EventRouter {
             Event::Strategy(_) => EventType::Strategy,
             Event::Risk(_) => EventType::Risk,
             Event::Execution(_) => EventType::Execution,
+            Event::AIAdvisor(_) => EventType::AIAdvisor,
             Event::DexTransaction(_) => EventType::DexTransaction,
         }
     }

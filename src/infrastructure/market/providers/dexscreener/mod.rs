@@ -13,10 +13,20 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 const DEXSCREENER_TOKENS_URL: &str = "https://api.dexscreener.com/latest/dex/tokens/";
-const RAYDIUM_PAIRS_URL: &str = "https://api.raydium.io/v2/main/pairs";
+// Trending tokens on DexScreener — fast, small, no auth needed.
+// Returns the most actively traded Solana tokens right now.
+const DEXSCREENER_TRENDING_URL: &str = "https://api.dexscreener.com/token-boosts/top/v1";
+// Broad search for active Solana pairs by keyword
+const DEXSCREENER_SEARCH_URLS: &[&str] = &[
+    "https://api.dexscreener.com/latest/dex/search?q=bonk",
+    "https://api.dexscreener.com/latest/dex/search?q=sol",
+    "https://api.dexscreener.com/latest/dex/search?q=wif",
+    "https://api.dexscreener.com/latest/dex/search?q=jup",
+    "https://api.dexscreener.com/latest/dex/search?q=ray",
+];
 const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
-const TOKEN_LIST_CACHE_SECS: u64 = 3600; // refresh Raydium token list every hour
-const TOKEN_LIST_BACKOFF_SECS: u64 = 300; // after a failure, wait 5 min before retrying
+const TOKEN_LIST_CACHE_SECS: u64 = 900;  // refresh token list every 15 min (fast endpoint)
+const TOKEN_LIST_BACKOFF_SECS: u64 = 60; // after a failure, retry in 1 min
 
 // Known stablecoins — no price movement, no momentum signals
 const STABLECOIN_MINTS: &[&str] = &[
@@ -38,9 +48,9 @@ struct TokenListCache {
     is_backoff: bool,
 }
 
-/// DexScreener + Raydium market data provider for Solana.
-/// Discovers top tokens dynamically from Raydium (refreshed hourly),
-/// fetches current prices from DexScreener each scan cycle.
+/// DexScreener market data provider for Solana.
+/// Discovers trending tokens via DexScreener's trending endpoint (refreshed every 15 min),
+/// fetches current prices from DexScreener each scan cycle. No external dependencies.
 pub struct DexScreenerProvider {
     client: Client,
     min_volume_usd: f64,
@@ -66,21 +76,15 @@ impl DexScreenerProvider {
         }
     }
 
-    /// Get the list of token mints to scan, refreshing from Raydium hourly.
+    /// Get the list of token mints to scan, refreshing from DexScreener trending every 15 min.
     ///
     /// Caching strategy:
-    /// - Normal: Raydium list cached for TOKEN_LIST_CACHE_SECS (1 hour). Token discovery
-    ///   changes slowly so hourly freshness is sufficient. Note: prices are fetched from
-    ///   DexScreener every scan cycle regardless — only the *list of which tokens to watch*
-    ///   is cached here.
-    /// - On failure (429, network error): back off for TOKEN_LIST_BACKOFF_SECS (5 min)
-    ///   before retrying. If a prior successful list exists, keep using it during the
-    ///   backoff so trading continues uninterrupted. The `fetched_at` timestamp resets on
-    ///   each failed attempt so the 5-min window is measured from the most recent try.
-    /// - No prior list + failure: skip trading for up to 5 min until Raydium recovers.
-    ///   This is preferable to trading on a hardcoded stale list.
+    /// - Normal: list cached for TOKEN_LIST_CACHE_SECS (15 min). Prices are fetched from
+    ///   DexScreener every scan cycle — only the list of which tokens to watch is cached.
+    /// - On failure: back off TOKEN_LIST_BACKOFF_SECS (1 min), reuse last known list so
+    ///   trading continues uninterrupted.
+    /// - No prior list + failure: skip this scan cycle.
     async fn get_token_mints(&self, limit: usize) -> Vec<String> {
-        // Check cache — use shorter TTL if previous fetch failed (backoff mode)
         {
             let cache = self.token_cache.read().await;
             if let Some(ref c) = *cache {
@@ -90,16 +94,15 @@ impl DexScreenerProvider {
                         debug!("Token list cache hit ({} mints)", c.mints.len());
                         return c.mints.iter().take(limit).cloned().collect();
                     }
-                    // In backoff with no prior list — skip this cycle
                     return vec![];
                 }
             }
         }
 
-        info!("Fetching top Solana tokens from Raydium...");
-        match self.fetch_raydium_top_mints(limit).await {
+        info!("Fetching trending Solana tokens from DexScreener...");
+        match self.fetch_dexscreener_trending_mints(limit).await {
             Ok(mints) if !mints.is_empty() => {
-                info!("Raydium: discovered {} token mints for scanning", mints.len());
+                info!("DexScreener trending: discovered {} token mints", mints.len());
                 let mut cache = self.token_cache.write().await;
                 *cache = Some(TokenListCache {
                     mints: mints.clone(),
@@ -109,15 +112,14 @@ impl DexScreenerProvider {
                 mints
             }
             Ok(_) => {
-                warn!("Raydium returned empty token list — backing off {}s", TOKEN_LIST_BACKOFF_SECS);
+                warn!("DexScreener trending returned empty list — backing off {}s", TOKEN_LIST_BACKOFF_SECS);
                 let mut cache = self.token_cache.write().await;
                 *cache = Some(TokenListCache { mints: vec![], fetched_at: Instant::now(), is_backoff: true });
                 vec![]
             }
             Err(e) => {
-                warn!("Raydium discovery failed: {} — backing off {}s", e, TOKEN_LIST_BACKOFF_SECS);
+                warn!("DexScreener trending failed: {} — backing off {}s", e, TOKEN_LIST_BACKOFF_SECS);
                 let mut cache = self.token_cache.write().await;
-                // Preserve last known good list so trading continues during the backoff window
                 let last_mints = cache.as_ref().map(|c| c.mints.clone()).unwrap_or_default();
                 if !last_mints.is_empty() {
                     info!("Using last known token list ({} mints) during backoff", last_mints.len());
@@ -128,43 +130,74 @@ impl DexScreenerProvider {
         }
     }
 
-    /// Fetch top WSOL-paired token mints from Raydium by 24h volume.
-    async fn fetch_raydium_top_mints(&self, limit: usize) -> Result<Vec<String>> {
-        let response = self
-            .client
-            .get(RAYDIUM_PAIRS_URL)
-            .send()
-            .await
-            .map_err(|e| Error::Network(format!("Raydium request failed: {}", e)))?;
+    /// Discover top Solana token mints using DexScreener's trending and search endpoints.
+    /// Fast (small responses), no auth, no dependency on Raydium.
+    async fn fetch_dexscreener_trending_mints(&self, limit: usize) -> Result<Vec<String>> {
+        let mut mint_volumes: HashMap<String, f64> = HashMap::new();
 
-        if !response.status().is_success() {
-            return Err(Error::Network(format!(
-                "Raydium returned status: {}",
-                response.status()
-            )));
+        // 1. Trending/boosted tokens (small, fast)
+        if let Ok(response) = self.client.get(DEXSCREENER_TRENDING_URL).send().await {
+            if response.status().is_success() {
+                #[derive(serde::Deserialize)]
+                struct BoostEntry {
+                    #[serde(rename = "chainId")]
+                    chain_id: String,
+                    #[serde(rename = "tokenAddress")]
+                    token_address: String,
+                }
+                if let Ok(entries) = response.json::<Vec<BoostEntry>>().await {
+                    for e in entries {
+                        if e.chain_id == "solana"
+                            && !STABLECOIN_MINTS.contains(&e.token_address.as_str())
+                            && e.token_address != WSOL_MINT
+                        {
+                            mint_volumes.entry(e.token_address).or_insert(0.0);
+                        }
+                    }
+                }
+            }
         }
 
-        let pairs: Vec<RaydiumPair> = response
-            .json()
-            .await
-            .map_err(|e| Error::Parse(format!("Failed to parse Raydium response: {}", e)))?;
+        // 2. Search for active pairs across popular Solana tokens
+        #[derive(serde::Deserialize)]
+        struct SearchResponse {
+            #[serde(default)]
+            pairs: Vec<DexPair>,
+        }
 
-        // Filter: WSOL as quote, exclude stables, sort by volume
-        let mut filtered: Vec<(String, f64)> = pairs
-            .into_iter()
-            .filter(|p| {
-                p.quote_mint == WSOL_MINT
-                    && !STABLECOIN_MINTS.contains(&p.base_mint.as_str())
-                    && p.base_mint != WSOL_MINT
-                    && p.volume_24h > 0.0
+        let search_futures: Vec<_> = DEXSCREENER_SEARCH_URLS
+            .iter()
+            .map(|url| {
+                let client = self.client.clone();
+                let url = url.to_string();
+                async move {
+                    client.get(&url).send().await
+                        .ok()?
+                        .json::<SearchResponse>().await.ok()
+                }
             })
-            .map(|p| (p.base_mint, p.volume_24h))
             .collect();
 
-        filtered.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-        filtered.dedup_by(|a, b| a.0 == b.0); // keep highest-volume pair per mint
+        let search_results = futures::future::join_all(search_futures).await;
+        for result in search_results.into_iter().flatten() {
+            for mut pair in result.pairs {
+                if pair.chain_id != "solana" { continue; }
+                // Normalise: real token in base position
+                if pair.base_token.address == WSOL_MINT {
+                    if let Some(qt) = pair.quote_token.take() {
+                        pair.base_token = qt;
+                    } else { continue; }
+                }
+                let addr = &pair.base_token.address;
+                if addr == WSOL_MINT || STABLECOIN_MINTS.contains(&addr.as_str()) { continue; }
+                let entry = mint_volumes.entry(addr.clone()).or_insert(0.0);
+                *entry = entry.max(pair.volume.h24);
+            }
+        }
 
-        Ok(filtered.into_iter().take(limit).map(|(mint, _)| mint).collect())
+        let mut ranked: Vec<(String, f64)> = mint_volumes.into_iter().collect();
+        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        Ok(ranked.into_iter().take(limit).map(|(mint, _)| mint).collect())
     }
 
     /// Batch-query DexScreener for current price/volume data on a list of mints.
@@ -336,17 +369,6 @@ impl MarketDataProvider for DexScreenerProvider {
             token_cache: self.token_cache.clone(),
         })
     }
-}
-
-// ── Raydium response types ────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RaydiumPair {
-    base_mint: String,
-    quote_mint: String,
-    #[serde(default)]
-    volume_24h: f64,
 }
 
 // ── DexScreener response types ────────────────────────────────────────────────

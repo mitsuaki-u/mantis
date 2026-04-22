@@ -35,7 +35,7 @@ pub async fn handle_event_internal(event: Event, ctx: ExecutionContext<'_>) -> R
         Event::Market(market_event) => {
             handle_market_event(market_event, ctx).await?;
         }
-        Event::Strategy(_) | Event::Execution(_) => {
+        Event::AIAdvisor(_) | Event::Strategy(_) | Event::Execution(_) => {
             // Silently ignore unhandled events
         }
     }

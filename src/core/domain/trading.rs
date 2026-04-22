@@ -51,6 +51,12 @@ pub struct SignalMetadata {
     pub signal_volume_24h: f64,
     pub strategy_name: String,
     pub market_conditions: String,
+    // Indicator values for AI advisor context
+    pub rsi: Option<f64>,
+    pub bollinger_pct: Option<f64>,
+    pub momentum_score: Option<f64>,
+    pub volume_24h: Option<f64>,
+    pub price_change_24h: Option<f64>,
 }
 
 impl SignalMetadata {
@@ -67,6 +73,11 @@ impl SignalMetadata {
             signal_volume_24h,
             strategy_name,
             market_conditions,
+            rsi: None,
+            bollinger_pct: None,
+            momentum_score: None,
+            volume_24h: None,
+            price_change_24h: None,
         }
     }
 }
