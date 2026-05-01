@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::core::domain::market::TokenMetrics;
 use crate::core::domain::trading::{ExitReason, Position};
-use crate::core::indicators::PriceTimeSeries;
+use crate::core::indicators::{IndicatorWeights, PriceTimeSeries};
 
 /// Trading strategy trait that all strategy implementations must implement
 pub trait TradingStrategy: fmt::Display + Send + Sync + 'static {
@@ -33,6 +33,23 @@ pub trait TradingStrategy: fmt::Display + Send + Sync + 'static {
 
     /// Get access to the price data map for market data updates
     fn get_price_data(&mut self) -> &mut Arc<DashMap<String, PriceTimeSeries>>;
+
+    /// Read-only snapshot of a token's price time series, if tracked.
+    ///
+    /// Parallel to `get_price_data` but non-mutating — used by callers that
+    /// need to inspect indicator state without holding a mutable borrow of
+    /// the strategy (e.g. assembling `SignalMetadata` at signal publication).
+    fn price_series_for(&self, token_id: &str) -> Option<PriceTimeSeries>;
+
+    /// Indicator weights used by this strategy's composite momentum calculation.
+    ///
+    /// Default returns `IndicatorWeights::default()`; strategies with
+    /// configurable weights (e.g. `MomentumStrategy`) should override so that
+    /// downstream consumers compute the same composite score the strategy
+    /// used for its decision.
+    fn indicator_weights(&self) -> IndicatorWeights {
+        IndicatorWeights::default()
+    }
 
     /// Get the minimum volume threshold for this strategy
     fn min_volume(&self) -> f64;
@@ -131,6 +148,20 @@ impl TradingStrategy for Strategy {
         match self {
             Strategy::Momentum(s) => s.get_price_data(),
             Strategy::Rsi(s) => s.get_price_data(),
+        }
+    }
+
+    fn price_series_for(&self, token_id: &str) -> Option<PriceTimeSeries> {
+        match self {
+            Strategy::Momentum(s) => s.price_series_for(token_id),
+            Strategy::Rsi(s) => s.price_series_for(token_id),
+        }
+    }
+
+    fn indicator_weights(&self) -> IndicatorWeights {
+        match self {
+            Strategy::Momentum(s) => s.indicator_weights(),
+            Strategy::Rsi(s) => s.indicator_weights(),
         }
     }
 

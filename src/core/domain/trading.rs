@@ -80,6 +80,23 @@ impl SignalMetadata {
             price_change_24h: None,
         }
     }
+
+    /// Attach an indicator snapshot + 24h market values to the metadata.
+    ///
+    /// Builder-style so the call site stays readable in `publish_signal`.
+    pub fn with_indicators(
+        mut self,
+        snapshot: crate::core::indicators::IndicatorSnapshot,
+        volume_24h: f64,
+        price_change_24h: f64,
+    ) -> Self {
+        self.rsi = snapshot.rsi;
+        self.bollinger_pct = snapshot.bollinger_pct;
+        self.momentum_score = snapshot.momentum_score;
+        self.volume_24h = Some(volume_24h);
+        self.price_change_24h = Some(price_change_24h);
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

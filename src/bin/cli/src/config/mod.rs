@@ -236,8 +236,14 @@ pub struct TradingConfig {
     pub max_trade_risk_pct: f64,
 
     /// Minimum required ETH balance for trading (must be positive)
-    #[serde(default = "default_min_required_eth_balance_for_trading", alias = "min_eth_balance")]
-    #[validate(range(min = 0.0, message = "Minimum native token balance must be non-negative"))]
+    #[serde(
+        default = "default_min_required_eth_balance_for_trading",
+        alias = "min_eth_balance"
+    )]
+    #[validate(range(
+        min = 0.0,
+        message = "Minimum native token balance must be non-negative"
+    ))]
     pub min_native_balance: f64,
 
     /// List of specific tokens to track (empty means use defaults)
@@ -390,7 +396,6 @@ pub struct DexConfig {
 
     #[serde(default = "default_paper_simulated_weth_balance")]
     pub paper_simulated_weth_balance: f64,
-
 }
 
 /// Solana network configuration
@@ -606,6 +611,19 @@ impl Config {
         }
 
         // Initialize any required optional fields here
+    }
+
+    /// Resolve the Anthropic API key — config field takes precedence, falls back
+    /// to the `ANTHROPIC_API_KEY` env var. Empty strings count as missing.
+    pub fn resolve_anthropic_api_key(&self) -> Option<String> {
+        self.anthropic_api_key
+            .clone()
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                std::env::var("ANTHROPIC_API_KEY")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+            })
     }
 
     /// Load configuration from multiple sources with priority:

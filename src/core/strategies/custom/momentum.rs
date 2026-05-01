@@ -80,6 +80,14 @@ impl TradingStrategy for MomentumStrategy {
         &mut self.price_data
     }
 
+    fn price_series_for(&self, token_id: &str) -> Option<PriceTimeSeries> {
+        self.price_data.get(token_id).map(|entry| entry.clone())
+    }
+
+    fn indicator_weights(&self) -> IndicatorWeights {
+        self.indicator_weights
+    }
+
     fn analyze_for_entry(&self, token: &TokenMetrics) -> bool {
         if token.symbol.is_empty() {
             debug!(

@@ -3,6 +3,7 @@ use crate::application::errors::Error;
 use crate::core::constants::{ENABLE_PRICE_CROSS_CHECK, MAX_PRICE_DISCREPANCY_THRESHOLD};
 use crate::core::domain::market::TokenMetrics;
 use crate::core::domain::trading::Signal;
+use crate::core::indicators::{compute_snapshot, IndicatorSnapshot};
 use crate::core::strategies::traits::TradingStrategy;
 use crate::core::utils::f64_to_decimal;
 use crate::core::utils::validation::price::validate_price_discrepancy;
@@ -49,6 +50,27 @@ fn convert_to_strategy_position(
 }
 
 impl StrategyActor {
+    /// Compute an indicator snapshot for a token from the strategy's price
+    /// time series. Returns an empty snapshot (all `None`) if the token has
+    /// no tracked series yet — the snapshot itself degrades gracefully when
+    /// individual indicators lack enough data.
+    ///
+    /// Uses the strategy's own `indicator_weights()` so the composite
+    /// momentum score matches what the strategy used to decide.
+    fn indicator_snapshot_for(&self, token_id: &str, token_symbol: &str) -> IndicatorSnapshot {
+        let weights = self.strategy.indicator_weights();
+        match self.strategy.price_series_for(token_id) {
+            Some(ts) => compute_snapshot(&ts, &weights, token_symbol, token_id),
+            None => {
+                warn!(
+                    "No price series for {} — snapshot empty (likely token-id key mismatch between update_market_data and signal publish)",
+                    token_id
+                );
+                IndicatorSnapshot::default()
+            }
+        }
+    }
+
     /// Publish a trading signal event
     async fn publish_signal(
         &mut self,
@@ -65,20 +87,43 @@ impl StrategyActor {
             token_metrics.price_usd
         );
 
+        let snapshot = self.indicator_snapshot_for(&token_metrics.id, &token_metrics.symbol);
+
+        info!(
+            "📊 Signal indicators for {}: RSI={}, BB%={}, Momentum={}",
+            token_id,
+            snapshot
+                .rsi
+                .map_or("n/a".to_string(), |v| format!("{:.1}", v)),
+            snapshot
+                .bollinger_pct
+                .map_or("n/a".to_string(), |v| format!("{:.0}", v)),
+            snapshot
+                .momentum_score
+                .map_or("n/a".to_string(), |v| format!("{:.2}", v)),
+        );
+
+        let metadata = crate::events::SignalMetadata::new(
+            token_metrics.price_usd,
+            token_metrics.volume_24h,
+            self.strategy.name().to_string(),
+            format!(
+                "price=${:.8}, volume=${:.2}M",
+                token_metrics.price_usd,
+                token_metrics.volume_24h / 1_000_000.0
+            ),
+        )
+        .with_indicators(
+            snapshot,
+            token_metrics.volume_24h,
+            token_metrics.price_change_24h,
+        );
+
         let strategy_event = Event::Strategy(StrategyEvent::Signal {
             token_id: token_id.to_string(),
             signal,
             timestamp,
-            metadata: crate::events::SignalMetadata::new(
-                token_metrics.price_usd,
-                token_metrics.volume_24h,
-                self.strategy.name().to_string(),
-                format!(
-                    "price=${:.8}, volume=${:.2}M",
-                    token_metrics.price_usd,
-                    token_metrics.volume_24h / 1_000_000.0
-                ),
-            ),
+            metadata,
         });
 
         if let Err(e) = self.event_router.publish(strategy_event).await {

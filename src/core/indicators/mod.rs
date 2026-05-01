@@ -540,6 +540,62 @@ pub fn calculate_composite_momentum(
     Some(normalized_score)
 }
 
+/// Snapshot of indicator values at signal-generation time.
+///
+/// Populated from a token's `PriceTimeSeries` and attached to `SignalMetadata`
+/// so downstream consumers (e.g. the AI advisor) receive real indicator context
+/// instead of fallback defaults.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct IndicatorSnapshot {
+    pub rsi: Option<f64>,
+    /// Position of the latest price within the Bollinger bands, 0-100%.
+    pub bollinger_pct: Option<f64>,
+    /// Composite momentum score, -100 to 100. `None` when insufficient data.
+    pub momentum_score: Option<f64>,
+}
+
+/// Compute an `IndicatorSnapshot` from a price time series.
+///
+/// Each indicator is computed independently and contributes `None` when the
+/// series does not yet have enough data. Uses the profile's configured
+/// periods; does not fail the whole snapshot if one indicator lacks data.
+pub fn compute_snapshot(
+    time_series: &PriceTimeSeries,
+    weights: &IndicatorWeights,
+    token_symbol: &str,
+    token_id: &str,
+) -> IndicatorSnapshot {
+    let (rsi_period, _fast, _slow, _signal, bollinger_period, _vol) =
+        get_indicator_periods(time_series.profile);
+
+    let prices = time_series.prices();
+    let latest_price = prices.last().copied();
+
+    let rsi = calculate_rsi(&prices, rsi_period);
+
+    let bollinger_pct = match (
+        calculate_bollinger_bands(
+            &prices,
+            bollinger_period,
+            crate::core::constants::BOLLINGER_STD_DEV_MULTIPLIER,
+        ),
+        latest_price,
+    ) {
+        (Some((upper, _middle, lower)), Some(price)) if upper > lower => {
+            Some((price - lower) / (upper - lower) * 100.0)
+        }
+        _ => None,
+    };
+
+    let momentum_score = calculate_composite_momentum(time_series, weights, token_symbol, token_id);
+
+    IndicatorSnapshot {
+        rsi,
+        bollinger_pct,
+        momentum_score,
+    }
+}
+
 /// Weights for each indicator in the composite momentum calculation
 #[derive(Debug, Clone, Copy)]
 pub struct IndicatorWeights {
@@ -578,5 +634,63 @@ impl IndicatorWeights {
     pub fn adjust_for_market_conditions(&mut self, _volatility: f64, _trend_strength: f64) {
         // Advanced adaptive logic would go here
         // For now, using default weights
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::constants::IndicatorProfile;
+
+    fn series_with(prices: &[f64]) -> PriceTimeSeries {
+        let mut ts = PriceTimeSeries::new(IndicatorProfile::default());
+        for &p in prices {
+            ts.add_data_point(p, 1_000_000.0, Utc::now());
+        }
+        ts
+    }
+
+    #[test]
+    fn snapshot_empty_series_returns_all_none() {
+        let ts = PriceTimeSeries::new(IndicatorProfile::default());
+        let snap = compute_snapshot(&ts, &IndicatorWeights::default(), "TOK", "tok");
+        assert!(snap.rsi.is_none());
+        assert!(snap.bollinger_pct.is_none());
+        assert!(snap.momentum_score.is_none());
+    }
+
+    #[test]
+    fn snapshot_populates_rsi_and_bollinger_with_enough_data() {
+        // 30 oscillating prices — enough for RSI(14) and Bollinger(20).
+        let prices: Vec<f64> = (0..30)
+            .map(|i| 100.0 + if i % 2 == 0 { 1.0 } else { -0.5 })
+            .collect();
+        let ts = series_with(&prices);
+
+        let snap = compute_snapshot(&ts, &IndicatorWeights::default(), "TOK", "tok");
+        assert!(snap.rsi.is_some(), "RSI should populate with 30 points");
+        assert!(
+            snap.bollinger_pct.is_some(),
+            "Bollinger % should populate with 30 points"
+        );
+        let bb = snap.bollinger_pct.unwrap();
+        assert!(
+            (0.0..=100.0).contains(&bb) || bb.is_finite(),
+            "Bollinger % should be finite, got {}",
+            bb
+        );
+    }
+
+    #[test]
+    fn snapshot_momentum_requires_full_profile_data() {
+        // Only 30 points — Standard profile needs (2×26)+9 = 61 for MACD, so
+        // composite momentum should be None here.
+        let prices: Vec<f64> = (0..30).map(|i| 100.0 + i as f64).collect();
+        let ts = series_with(&prices);
+        let snap = compute_snapshot(&ts, &IndicatorWeights::default(), "TOK", "tok");
+        assert!(
+            snap.momentum_score.is_none(),
+            "Momentum needs full profile warmup"
+        );
     }
 }

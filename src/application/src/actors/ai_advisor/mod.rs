@@ -30,7 +30,9 @@ impl AIAdvisorActor {
         let advisor = api_key.map(ClaudeAdvisor::new);
 
         if advisor.is_none() {
-            warn!("AIAdvisorActor: no Anthropic API key — signals pass through without AI analysis");
+            warn!(
+                "AIAdvisorActor: no Anthropic API key — signals pass through without AI analysis"
+            );
         } else {
             info!("AIAdvisorActor: Claude AI advisor enabled (claude-haiku)");
         }
@@ -65,7 +67,9 @@ impl Actor for AIAdvisorActor {
     async fn start(&mut self) -> Result<()> {
         *self.running.write().await = true;
         let mut receiver = self.receiver.take().ok_or_else(|| {
-            crate::application::errors::Error::Internal("AIAdvisorActor already started".to_string())
+            crate::application::errors::Error::Internal(
+                "AIAdvisorActor already started".to_string(),
+            )
         })?;
 
         let running = self.running.clone();
@@ -84,7 +88,13 @@ impl Actor for AIAdvisorActor {
 
                 match msg {
                     Some(Message::Event(event)) => {
-                        if let Event::Strategy(StrategyEvent::Signal { token_id, signal, metadata, timestamp }) = *event {
+                        if let Event::Strategy(StrategyEvent::Signal {
+                            token_id,
+                            signal,
+                            metadata,
+                            timestamp: _,
+                        }) = *event
+                        {
                             if signal == Signal::Buy {
                                 let open = *open_positions.read().await;
                                 let daily_pnl = *daily_pnl_pct.read().await;
@@ -100,29 +110,45 @@ impl Actor for AIAdvisorActor {
                                             &token_id[..token_id.len().min(10)],
                                             metadata.rsi.unwrap_or(50.0)
                                         );
-                                        match adv.analyse_signal(
-                                            &token_id[..token_id.len().min(10)],
-                                            &token_id,
-                                            metadata.rsi.unwrap_or(50.0),
-                                            metadata.bollinger_pct.unwrap_or(50.0),
-                                            metadata.volume_24h.unwrap_or(0.0),
-                                            metadata.price_change_24h.unwrap_or(0.0),
-                                            metadata.signal_price,
-                                            metadata.momentum_score.unwrap_or(0.0),
-                                            open,
-                                            max_positions,
-                                            daily_pnl,
-                                        ).await {
+                                        match adv
+                                            .analyse_signal(
+                                                &token_id[..token_id.len().min(10)],
+                                                &token_id,
+                                                metadata.rsi.unwrap_or(50.0),
+                                                metadata.bollinger_pct.unwrap_or(50.0),
+                                                metadata.volume_24h.unwrap_or(0.0),
+                                                metadata.price_change_24h.unwrap_or(0.0),
+                                                metadata.signal_price,
+                                                metadata.momentum_score.unwrap_or(0.0),
+                                                open,
+                                                max_positions,
+                                                daily_pnl,
+                                            )
+                                            .await
+                                        {
                                             Ok(d) => {
                                                 if d.approve {
-                                                    info!("✅ AI APPROVED {} ({}%) — {}", &token_id[..token_id.len().min(10)], d.confidence, d.reasoning);
+                                                    info!(
+                                                        "✅ AI APPROVED {} ({}%) — {}",
+                                                        &token_id[..token_id.len().min(10)],
+                                                        d.confidence,
+                                                        d.reasoning
+                                                    );
                                                 } else {
-                                                    info!("❌ AI REJECTED {} ({}%) — {}", &token_id[..token_id.len().min(10)], d.confidence, d.reasoning);
+                                                    info!(
+                                                        "❌ AI REJECTED {} ({}%) — {}",
+                                                        &token_id[..token_id.len().min(10)],
+                                                        d.confidence,
+                                                        d.reasoning
+                                                    );
                                                 }
                                                 (d.approve, d.confidence, d.reasoning)
                                             }
                                             Err(e) => {
-                                                warn!("AIAdvisor: Claude error ({}), failing open", e);
+                                                warn!(
+                                                    "AIAdvisor: Claude error ({}), failing open",
+                                                    e
+                                                );
                                                 (true, 50, format!("AI unavailable: {}", e))
                                             }
                                         }
@@ -132,25 +158,41 @@ impl Actor for AIAdvisorActor {
                                 // Publish AIAdvisorEvent — routes to risk (if approved) and database.
                                 // Approved signals are handled by RiskManager via AIAdvisorEvent;
                                 // re-emitting as Strategy would loop back to this actor.
-                                let _ = event_router.publish(Event::AIAdvisor(AIAdvisorEvent::SignalAnalysed {
-                                    token_id,
-                                    signal,
-                                    approved,
-                                    confidence,
-                                    reasoning,
-                                    metadata,
-                                }));
+                                if let Err(e) = event_router
+                                    .publish(Event::AIAdvisor(AIAdvisorEvent::SignalAnalysed {
+                                        token_id,
+                                        signal,
+                                        approved,
+                                        confidence,
+                                        reasoning,
+                                        metadata,
+                                    }))
+                                    .await
+                                {
+                                    warn!(
+                                        "AIAdvisor: failed to publish SignalAnalysed event: {}",
+                                        e
+                                    );
+                                }
                             } else {
                                 // SELL/HOLD — bypass AI, forward directly as AIAdvisor approved
                                 // (routes to risk via AIAdvisor → risk routing, no loop)
-                                let _ = event_router.publish(Event::AIAdvisor(AIAdvisorEvent::SignalAnalysed {
-                                    token_id,
-                                    signal,
-                                    approved: true,
-                                    confidence: 100,
-                                    reasoning: "SELL signal — bypasses AI advisor".to_string(),
-                                    metadata,
-                                }));
+                                if let Err(e) = event_router
+                                    .publish(Event::AIAdvisor(AIAdvisorEvent::SignalAnalysed {
+                                        token_id,
+                                        signal,
+                                        approved: true,
+                                        confidence: 100,
+                                        reasoning: "SELL signal — bypasses AI advisor".to_string(),
+                                        metadata,
+                                    }))
+                                    .await
+                                {
+                                    warn!(
+                                        "AIAdvisor: failed to publish SignalAnalysed event: {}",
+                                        e
+                                    );
+                                }
                             }
                         }
                     }

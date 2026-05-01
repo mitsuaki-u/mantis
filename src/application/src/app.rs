@@ -734,12 +734,13 @@ impl TradingBotSystem {
         // Create the AI Advisor actor — sits between StrategyActor and RiskManagerActor.
         // Intercepts BUY signals, runs them through Claude, and re-emits approved ones.
         let ai_advisor_actor = crate::application::actors::AIAdvisorActor::new(
-            self.config.anthropic_api_key.clone(),
+            self.config.resolve_anthropic_api_key(),
             self.event_router.clone(),
             self.config.trading.max_positions,
         );
         let ai_advisor_ref =
-            crate::application::actors::spawn_actor(ai_advisor_actor, "ai_advisor".to_string()).await?;
+            crate::application::actors::spawn_actor(ai_advisor_actor, "ai_advisor".to_string())
+                .await?;
 
         if let Err(e) = self
             .event_router
@@ -820,6 +821,9 @@ impl TradingBotSystem {
                 .await?;
             supervisor
                 .register_actor("strategy".to_string(), strategy_ref.clone())
+                .await?;
+            supervisor
+                .register_actor("ai_advisor".to_string(), ai_advisor_ref.clone())
                 .await?;
             supervisor
                 .register_actor("execution".to_string(), execution_ref.clone())
