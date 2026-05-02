@@ -129,7 +129,7 @@ pub async fn start_trading(
             row("⚠  WARNING:", "Real funds will be used!");
             row("Risk:", "Capital is at risk of loss");
         }
-        row("Network:", &network_name);
+        row("Network:", network_name);
         if is_solana {
             row("DEX:", "Jupiter (via DexScreener discovery)");
         } else {

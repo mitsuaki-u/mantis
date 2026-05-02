@@ -1,4 +1,4 @@
-//! Configuration management for the Honeybadger application.
+//! Configuration management for the Mantis application.
 //!
 //! This module provides a modular configuration system with the following components:
 //! - `defaults`: Default values and constants

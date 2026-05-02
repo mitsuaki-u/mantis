@@ -25,7 +25,7 @@ const DEXSCREENER_SEARCH_URLS: &[&str] = &[
     "https://api.dexscreener.com/latest/dex/search?q=ray",
 ];
 const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
-const TOKEN_LIST_CACHE_SECS: u64 = 900;  // refresh token list every 15 min (fast endpoint)
+const TOKEN_LIST_CACHE_SECS: u64 = 900; // refresh token list every 15 min (fast endpoint)
 const TOKEN_LIST_BACKOFF_SECS: u64 = 60; // after a failure, retry in 1 min
 
 // Known stablecoins — no price movement, no momentum signals
@@ -38,7 +38,6 @@ const STABLECOIN_MINTS: &[&str] = &[
     "CXLBjMMcwkc17GfJtBos6rQCo1ypeH6eDbB82Kby4MRm", // UXD
     "7kbnvuGBxxj8AG9qp8Scn56muWGaRaFqxg1FsRp3PaFT", // UXD v2
 ];
-
 
 struct TokenListCache {
     mints: Vec<String>,
@@ -88,7 +87,11 @@ impl DexScreenerProvider {
         {
             let cache = self.token_cache.read().await;
             if let Some(ref c) = *cache {
-                let ttl = if c.is_backoff { TOKEN_LIST_BACKOFF_SECS } else { TOKEN_LIST_CACHE_SECS };
+                let ttl = if c.is_backoff {
+                    TOKEN_LIST_BACKOFF_SECS
+                } else {
+                    TOKEN_LIST_CACHE_SECS
+                };
                 if c.fetched_at.elapsed().as_secs() < ttl {
                     if !c.mints.is_empty() {
                         debug!("Token list cache hit ({} mints)", c.mints.len());
@@ -102,7 +105,10 @@ impl DexScreenerProvider {
         info!("Fetching trending Solana tokens from DexScreener...");
         match self.fetch_dexscreener_trending_mints(limit).await {
             Ok(mints) if !mints.is_empty() => {
-                info!("DexScreener trending: discovered {} token mints", mints.len());
+                info!(
+                    "DexScreener trending: discovered {} token mints",
+                    mints.len()
+                );
                 let mut cache = self.token_cache.write().await;
                 *cache = Some(TokenListCache {
                     mints: mints.clone(),
@@ -112,19 +118,36 @@ impl DexScreenerProvider {
                 mints
             }
             Ok(_) => {
-                warn!("DexScreener trending returned empty list — backing off {}s", TOKEN_LIST_BACKOFF_SECS);
+                warn!(
+                    "DexScreener trending returned empty list — backing off {}s",
+                    TOKEN_LIST_BACKOFF_SECS
+                );
                 let mut cache = self.token_cache.write().await;
-                *cache = Some(TokenListCache { mints: vec![], fetched_at: Instant::now(), is_backoff: true });
+                *cache = Some(TokenListCache {
+                    mints: vec![],
+                    fetched_at: Instant::now(),
+                    is_backoff: true,
+                });
                 vec![]
             }
             Err(e) => {
-                warn!("DexScreener trending failed: {} — backing off {}s", e, TOKEN_LIST_BACKOFF_SECS);
+                warn!(
+                    "DexScreener trending failed: {} — backing off {}s",
+                    e, TOKEN_LIST_BACKOFF_SECS
+                );
                 let mut cache = self.token_cache.write().await;
                 let last_mints = cache.as_ref().map(|c| c.mints.clone()).unwrap_or_default();
                 if !last_mints.is_empty() {
-                    info!("Using last known token list ({} mints) during backoff", last_mints.len());
+                    info!(
+                        "Using last known token list ({} mints) during backoff",
+                        last_mints.len()
+                    );
                 }
-                *cache = Some(TokenListCache { mints: last_mints.clone(), fetched_at: Instant::now(), is_backoff: true });
+                *cache = Some(TokenListCache {
+                    mints: last_mints.clone(),
+                    fetched_at: Instant::now(),
+                    is_backoff: true,
+                });
                 last_mints.into_iter().take(limit).collect()
             }
         }
@@ -171,9 +194,14 @@ impl DexScreenerProvider {
                 let client = self.client.clone();
                 let url = url.to_string();
                 async move {
-                    client.get(&url).send().await
+                    client
+                        .get(&url)
+                        .send()
+                        .await
                         .ok()?
-                        .json::<SearchResponse>().await.ok()
+                        .json::<SearchResponse>()
+                        .await
+                        .ok()
                 }
             })
             .collect();
@@ -181,15 +209,21 @@ impl DexScreenerProvider {
         let search_results = futures::future::join_all(search_futures).await;
         for result in search_results.into_iter().flatten() {
             for mut pair in result.pairs {
-                if pair.chain_id != "solana" { continue; }
+                if pair.chain_id != "solana" {
+                    continue;
+                }
                 // Normalise: real token in base position
                 if pair.base_token.address == WSOL_MINT {
                     if let Some(qt) = pair.quote_token.take() {
                         pair.base_token = qt;
-                    } else { continue; }
+                    } else {
+                        continue;
+                    }
                 }
                 let addr = &pair.base_token.address;
-                if addr == WSOL_MINT || STABLECOIN_MINTS.contains(&addr.as_str()) { continue; }
+                if addr == WSOL_MINT || STABLECOIN_MINTS.contains(&addr.as_str()) {
+                    continue;
+                }
                 let entry = mint_volumes.entry(addr.clone()).or_insert(0.0);
                 *entry = entry.max(pair.volume.h24);
             }
@@ -197,7 +231,11 @@ impl DexScreenerProvider {
 
         let mut ranked: Vec<(String, f64)> = mint_volumes.into_iter().collect();
         ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-        Ok(ranked.into_iter().take(limit).map(|(mint, _)| mint).collect())
+        Ok(ranked
+            .into_iter()
+            .take(limit)
+            .map(|(mint, _)| mint)
+            .collect())
     }
 
     /// Batch-query DexScreener for current price/volume data on a list of mints.
@@ -218,11 +256,9 @@ impl DexScreenerProvider {
                 let client = self.client.clone();
                 let url = format!("{}{}", DEXSCREENER_TOKENS_URL, chunk.join(","));
                 async move {
-                    let response = client
-                        .get(&url)
-                        .send()
-                        .await
-                        .map_err(|e| Error::Network(format!("DexScreener request failed: {}", e)))?;
+                    let response = client.get(&url).send().await.map_err(|e| {
+                        Error::Network(format!("DexScreener request failed: {}", e))
+                    })?;
 
                     if !response.status().is_success() {
                         return Err(Error::Network(format!(
@@ -231,10 +267,9 @@ impl DexScreenerProvider {
                         )));
                     }
 
-                    let resp: TokenResponse = response
-                        .json()
-                        .await
-                        .map_err(|e| Error::Parse(format!("Failed to parse DexScreener response: {}", e)))?;
+                    let resp: TokenResponse = response.json().await.map_err(|e| {
+                        Error::Parse(format!("Failed to parse DexScreener response: {}", e))
+                    })?;
 
                     Ok(resp.pairs)
                 }
@@ -302,7 +337,11 @@ impl MarketDataProvider for DexScreenerProvider {
         tokens_to_track: &[String],
         _network: &str,
     ) -> Result<Vec<TokenMetrics>> {
-        let limit = if max_tokens_to_scan == 0 { 100 } else { max_tokens_to_scan };
+        let limit = if max_tokens_to_scan == 0 {
+            100
+        } else {
+            max_tokens_to_scan
+        };
 
         let mints: Vec<String> = if tokens_to_track.is_empty() {
             self.get_token_mints(limit).await

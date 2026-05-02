@@ -110,25 +110,42 @@ async fn handle_market_anomaly(
 // AI Advisor Events
 // ============================================================================
 
-async fn handle_ai_advisor_event(actor: &mut RiskManagerActor, event: AIAdvisorEvent) -> Result<()> {
+async fn handle_ai_advisor_event(
+    actor: &mut RiskManagerActor,
+    event: AIAdvisorEvent,
+) -> Result<()> {
     match event {
-        AIAdvisorEvent::SignalAnalysed { token_id, signal, approved, confidence, reasoning, metadata } => {
+        AIAdvisorEvent::SignalAnalysed {
+            token_id,
+            signal,
+            approved,
+            confidence,
+            reasoning,
+            metadata,
+        } => {
             if approved {
                 debug!(
                     "RiskManager: received AI-approved signal for {} ({}% confidence) — {}",
-                    &token_id[..token_id.len().min(10)], confidence, reasoning
+                    &token_id[..token_id.len().min(10)],
+                    confidence,
+                    reasoning
                 );
                 // Route the approved signal through the same path as a normal strategy signal
-                handle_strategy_event(actor, StrategyEvent::Signal {
-                    token_id,
-                    signal,
-                    timestamp: Utc::now(),
-                    metadata,
-                }).await
+                handle_strategy_event(
+                    actor,
+                    StrategyEvent::Signal {
+                        token_id,
+                        signal,
+                        timestamp: Utc::now(),
+                        metadata,
+                    },
+                )
+                .await
             } else {
                 debug!(
                     "RiskManager: AI-rejected signal for {} skipped — {}",
-                    &token_id[..token_id.len().min(10)], reasoning
+                    &token_id[..token_id.len().min(10)],
+                    reasoning
                 );
                 Ok(())
             }

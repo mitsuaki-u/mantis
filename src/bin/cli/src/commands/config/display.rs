@@ -29,7 +29,7 @@ pub async fn handle_show(show_secrets: bool, json: bool) -> Result<()> {
     }
 
     // Standard text output
-    println!("{}", "Honeybadger Configuration".bold().underline());
+    println!("{}", "Mantis Configuration".bold().underline());
     println!();
 
     // API Keys

@@ -42,5 +42,3 @@ jobs:
 
       - name: cargo test
         run: cargo test --lib
-        env:
-          HONEYBADGER_ALCHEMY_KEY: ${{ secrets.HONEYBADGER_ALCHEMY_KEY }}

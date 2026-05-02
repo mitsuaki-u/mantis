@@ -141,7 +141,7 @@ pub struct GlobalArgs {
     #[arg(long, global = true, value_parser = ["error", "warn", "info", "debug", "trace"])]
     pub log_level: Option<String>,
 
-    /// Filter logs by module (comma-separated, e.g., "honeybadger::trading,honeybadger::api")
+    /// Filter logs by module (comma-separated, e.g., "mantis::trading,mantis::api")
     #[arg(long, global = true)]
     pub log_modules: Option<String>,
 

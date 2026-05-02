@@ -1,7 +1,7 @@
 use super::ethereum::config::addresses::get_common_tokens;
 use super::ethereum::EthereumDexClient;
 use super::ethereum::{TransactionDetails, TransactionPriority, TransactionStatus};
-use crate::application::constants::{DEFAULT_SIMULATED_ETH_BALANCE, DEFAULT_SIMULATED_WETH_BALANCE};
+use crate::application::constants::DEFAULT_SIMULATED_ETH_BALANCE;
 use crate::config::Config;
 use crate::infrastructure::errors::Error;
 use crate::EventRouter;
@@ -12,12 +12,12 @@ use std::sync::Arc;
 /// Main DEX client enum.
 ///
 /// Variants:
-/// - `SolanaPaper` — Solana paper trading. No Ethereum deps. Simulates all
-///   swaps locally with configurable starting balance. Used for Week 1-2.
-/// - `Paper` — Ethereum paper trading. Uses EthereumDexClient for gas/price
-///   estimates but does not execute real transactions.
+/// - `SolanaPaper` — Solana paper trading. No Ethereum deps. Simulates swaps
+///   locally with a configurable starting balance.
+/// - `Paper` — Ethereum paper trading. Uses `EthereumDexClient` for gas and
+///   price estimates but does not execute real transactions.
 /// - `Live` — Ethereum live trading. Full on-chain execution via Uniswap V3.
-///   Solana live trading (Jupiter) replaces this in Week 3.
+///   Solana live execution (Jupiter swaps) is planned but not yet implemented.
 #[derive(Clone)]
 pub enum DexClient {
     /// Solana paper trading — no Ethereum client needed
@@ -41,25 +41,36 @@ impl DexClient {
     fn ethereum_client(&self) -> Option<&EthereumDexClient> {
         match self {
             DexClient::Live { ethereum_client }
-            | DexClient::Paper { ethereum_client, .. } => Some(ethereum_client),
+            | DexClient::Paper {
+                ethereum_client, ..
+            } => Some(ethereum_client),
             DexClient::SolanaPaper { .. } => None,
         }
     }
 
-    pub async fn connect_wallet(&mut self, private_key_hex: &str) -> crate::infrastructure::errors::Result<()> {
+    pub async fn connect_wallet(
+        &mut self,
+        private_key_hex: &str,
+    ) -> crate::infrastructure::errors::Result<()> {
         match self {
             DexClient::Live { ethereum_client }
-            | DexClient::Paper { ethereum_client, .. } => {
-                ethereum_client.connect_wallet(private_key_hex).await
-            }
+            | DexClient::Paper {
+                ethereum_client, ..
+            } => ethereum_client.connect_wallet(private_key_hex).await,
             DexClient::SolanaPaper { .. } => Ok(()),
         }
     }
 
     pub async fn get_native_balance(&self) -> crate::infrastructure::errors::Result<f64> {
         match self {
-            DexClient::SolanaPaper { simulated_sol_balance, .. } => Ok(*simulated_sol_balance),
-            DexClient::Paper { simulated_eth_balance, .. } => Ok(*simulated_eth_balance),
+            DexClient::SolanaPaper {
+                simulated_sol_balance,
+                ..
+            } => Ok(*simulated_sol_balance),
+            DexClient::Paper {
+                simulated_eth_balance,
+                ..
+            } => Ok(*simulated_eth_balance),
             DexClient::Live { ethereum_client } => ethereum_client.get_native_balance().await,
         }
     }
@@ -74,12 +85,20 @@ impl DexClient {
         }
     }
 
-    pub async fn get_wallet_token_balance(&self, token_address: &str) -> crate::infrastructure::errors::Result<f64> {
+    pub async fn get_wallet_token_balance(
+        &self,
+        token_address: &str,
+    ) -> crate::infrastructure::errors::Result<f64> {
         match self {
-            DexClient::SolanaPaper { simulated_base_token_balance, .. } => {
-                Ok(*simulated_base_token_balance)
-            }
-            DexClient::Paper { simulated_weth_balance, ethereum_client, .. } => {
+            DexClient::SolanaPaper {
+                simulated_base_token_balance,
+                ..
+            } => Ok(*simulated_base_token_balance),
+            DexClient::Paper {
+                simulated_weth_balance,
+                ethereum_client,
+                ..
+            } => {
                 let weth_address = ethereum_client.resolve_token_address("WETH").await?;
                 if token_address.to_lowercase() == weth_address.to_lowercase() {
                     Ok(*simulated_weth_balance)
@@ -93,14 +112,19 @@ impl DexClient {
         }
     }
 
-    pub async fn get_token_price_usd(&self, token_address: &str) -> crate::infrastructure::errors::Result<f64> {
+    pub async fn get_token_price_usd(
+        &self,
+        token_address: &str,
+    ) -> crate::infrastructure::errors::Result<f64> {
         match self {
             DexClient::SolanaPaper { .. } => {
                 // Solana paper trading — price validation is skipped at the strategy level
                 // for non-0x addresses, so this should not be called. Return 0 gracefully.
                 Ok(0.0)
             }
-            DexClient::Paper { ethereum_client, .. }
+            DexClient::Paper {
+                ethereum_client, ..
+            }
             | DexClient::Live { ethereum_client } => {
                 use rust_decimal::prelude::ToPrimitive;
                 let decimal_price = ethereum_client.get_token_price_usd(token_address).await?;
@@ -122,7 +146,9 @@ impl DexClient {
         match self {
             DexClient::SolanaPaper { .. } | DexClient::Paper { .. } => Ok(()),
             DexClient::Live { ethereum_client } => {
-                ethereum_client.ensure_weth_balance(required_weth, trade_size_usd, priority).await
+                ethereum_client
+                    .ensure_weth_balance(required_weth, trade_size_usd, priority)
+                    .await
             }
         }
     }
@@ -136,10 +162,13 @@ impl DexClient {
                 // Solana paper trading — execution is simulated by the execution actor.
                 // This path should not be reached during paper trading.
                 Err(Error::Config(
-                    "execute_swap called on SolanaPaper client — use paper simulation path".to_string(),
+                    "execute_swap called on SolanaPaper client — use paper simulation path"
+                        .to_string(),
                 ))
             }
-            DexClient::Paper { ethereum_client, .. }
+            DexClient::Paper {
+                ethereum_client, ..
+            }
             | DexClient::Live { ethereum_client } => ethereum_client.execute_swap(params).await,
         }
     }
@@ -147,28 +176,37 @@ impl DexClient {
     pub async fn get_transaction_status(
         &self,
         tx_hash: &str,
-    ) -> crate::infrastructure::errors::Result<(TransactionStatus, Option<TransactionDetails>)> {
+    ) -> crate::infrastructure::errors::Result<(TransactionStatus, Option<TransactionDetails>)>
+    {
         match self {
-            DexClient::SolanaPaper { .. } => {
-                Ok((TransactionStatus::Confirmed {
+            DexClient::SolanaPaper { .. } => Ok((
+                TransactionStatus::Confirmed {
                     tx_id: "paper-simulated".to_string(),
                     details: "Solana paper trade — simulated".to_string(),
                     confirmations: 1,
                     required_confirmations: 1,
                     finality_probability: 1.0,
-                }, None))
+                },
+                None,
+            )),
+            DexClient::Paper {
+                ethereum_client, ..
             }
-            DexClient::Paper { ethereum_client, .. }
             | DexClient::Live { ethereum_client } => {
                 ethereum_client.get_transaction_status(tx_hash).await
             }
         }
     }
 
-    pub async fn resolve_token_address(&self, token_id: &str) -> crate::infrastructure::errors::Result<String> {
+    pub async fn resolve_token_address(
+        &self,
+        token_id: &str,
+    ) -> crate::infrastructure::errors::Result<String> {
         match self {
             DexClient::SolanaPaper { .. } => Ok(token_id.to_string()),
-            DexClient::Paper { ethereum_client, .. }
+            DexClient::Paper {
+                ethereum_client, ..
+            }
             | DexClient::Live { ethereum_client } => {
                 ethereum_client.resolve_token_address(token_id).await
             }
@@ -186,17 +224,27 @@ impl DexClient {
                 // Solana fees are ~$0.0005 per transaction
                 Ok(0.0005)
             }
-            DexClient::Paper { ethereum_client, .. }
+            DexClient::Paper {
+                ethereum_client, ..
+            }
             | DexClient::Live { ethereum_client } => {
                 let from_addr = ethereum_client.resolve_token_address(from_token).await?;
                 let to_addr = ethereum_client.resolve_token_address(to_token).await?;
                 let from_address = ethers::types::Address::from_str(&from_addr).map_err(|e| {
-                    crate::infrastructure::errors::Error::Conversion(format!("Invalid from address: {}", e))
+                    crate::infrastructure::errors::Error::Conversion(format!(
+                        "Invalid from address: {}",
+                        e
+                    ))
                 })?;
                 let to_address = ethers::types::Address::from_str(&to_addr).map_err(|e| {
-                    crate::infrastructure::errors::Error::Conversion(format!("Invalid to address: {}", e))
+                    crate::infrastructure::errors::Error::Conversion(format!(
+                        "Invalid to address: {}",
+                        e
+                    ))
                 })?;
-                ethereum_client.estimate_swap_gas_fee(from_address, to_address, amount).await
+                ethereum_client
+                    .estimate_swap_gas_fee(from_address, to_address, amount)
+                    .await
             }
         }
     }
@@ -207,7 +255,9 @@ impl DexClient {
                 // Return SOL price approximation — not used for Solana paper trading
                 Ok(150.0)
             }
-            DexClient::Paper { ethereum_client, .. }
+            DexClient::Paper {
+                ethereum_client, ..
+            }
             | DexClient::Live { ethereum_client } => ethereum_client.get_eth_price_usd().await,
         }
     }
@@ -219,28 +269,42 @@ impl DexClient {
         amount_in_usd: f64,
     ) -> crate::infrastructure::errors::Result<(f64, f64)> {
         match self {
-            DexClient::SolanaPaper { simulated_base_token_balance, .. } => {
+            DexClient::SolanaPaper {
+                simulated_base_token_balance,
+                ..
+            } => {
                 // Simulate swap: assume 0.3% DEX fee, output ≈ input (paper trading)
                 let fee_pct = 0.003_f64;
                 let output = amount_in_usd * (1.0 - fee_pct);
                 let _ = simulated_base_token_balance; // balance checked by caller
                 Ok((output, fee_pct))
             }
-            DexClient::Paper { ethereum_client, .. }
+            DexClient::Paper {
+                ethereum_client, ..
+            }
             | DexClient::Live { ethereum_client } => {
                 let from_addr = ethereum_client.resolve_token_address(from_token).await?;
                 let to_addr = ethereum_client.resolve_token_address(to_token).await?;
                 let from_address = ethers::types::Address::from_str(&from_addr).map_err(|e| {
-                    crate::infrastructure::errors::Error::Conversion(format!("Invalid from address: {}", e))
+                    crate::infrastructure::errors::Error::Conversion(format!(
+                        "Invalid from address: {}",
+                        e
+                    ))
                 })?;
                 let to_address = ethers::types::Address::from_str(&to_addr).map_err(|e| {
-                    crate::infrastructure::errors::Error::Conversion(format!("Invalid to address: {}", e))
+                    crate::infrastructure::errors::Error::Conversion(format!(
+                        "Invalid to address: {}",
+                        e
+                    ))
                 })?;
                 let eth_price_usd = ethereum_client.get_eth_price_usd().await?;
                 let weth_amount = amount_in_usd / eth_price_usd;
 
                 let weth_balance = match self {
-                    DexClient::Paper { simulated_weth_balance, .. } => *simulated_weth_balance,
+                    DexClient::Paper {
+                        simulated_weth_balance,
+                        ..
+                    } => *simulated_weth_balance,
                     DexClient::Live { .. } => {
                         let weth_addr = ethereum_client.resolve_token_address("WETH").await?;
                         ethereum_client.get_token_balance(&weth_addr).await?
@@ -256,15 +320,32 @@ impl DexClient {
                 }
 
                 let amount_in = ethers::utils::parse_units(weth_amount.to_string(), "ether")
-                    .map_err(|e| crate::infrastructure::errors::Error::Parse(format!("Failed to parse WETH amount: {}", e)))?
+                    .map_err(|e| {
+                        crate::infrastructure::errors::Error::Parse(format!(
+                            "Failed to parse WETH amount: {}",
+                            e
+                        ))
+                    })?
                     .into();
 
-                let (amount_out, fee_pct) = ethereum_client.estimate_swap_output(from_address, to_address, amount_in).await?;
+                let (amount_out, fee_pct) = ethereum_client
+                    .estimate_swap_output(from_address, to_address, amount_in)
+                    .await?;
 
                 let amount_out_f64 = ethers::utils::format_units(amount_out, "ether")
-                    .map_err(|e| crate::infrastructure::errors::Error::Parse(format!("Failed to format output: {}", e)))?
+                    .map_err(|e| {
+                        crate::infrastructure::errors::Error::Parse(format!(
+                            "Failed to format output: {}",
+                            e
+                        ))
+                    })?
                     .parse::<f64>()
-                    .map_err(|e| crate::infrastructure::errors::Error::Parse(format!("Failed to parse output: {}", e)))?;
+                    .map_err(|e| {
+                        crate::infrastructure::errors::Error::Parse(format!(
+                            "Failed to parse output: {}",
+                            e
+                        ))
+                    })?;
 
                 Ok((amount_out_f64, fee_pct))
             }
@@ -274,7 +355,12 @@ impl DexClient {
     // ── Constructors ──────────────────────────────────────────────────────────
 
     pub fn new_paper_trading(config: &Config) -> crate::infrastructure::errors::Result<Self> {
-        let network = config.dex.network.as_deref().unwrap_or("mainnet").to_string();
+        let network = config
+            .dex
+            .network
+            .as_deref()
+            .unwrap_or("mainnet")
+            .to_string();
         info!("Creating paper trading DEX client for network: {}", network);
 
         if network == "solana" {
@@ -284,8 +370,7 @@ impl DexClient {
             };
             info!(
                 "Paper trading mode: SOL={:.2}, base_token={:.2} (simulated - no real funds)",
-                DEFAULT_SIMULATED_ETH_BALANCE,
-                config.dex.paper_simulated_weth_balance,
+                DEFAULT_SIMULATED_ETH_BALANCE, config.dex.paper_simulated_weth_balance,
             );
             return Ok(client);
         }
@@ -327,15 +412,25 @@ impl DexClient {
     ) -> crate::infrastructure::errors::Result<String> {
         if let Some(env_var) = &wallet_config.private_key_env {
             std::env::var(env_var).map_err(|_| {
-                Error::Config(format!("Cannot load private key from environment variable: {}", env_var))
+                Error::Config(format!(
+                    "Cannot load private key from environment variable: {}",
+                    env_var
+                ))
             })
         } else if let Some(file_path) = &wallet_config.private_key_file {
             Ok(std::fs::read_to_string(file_path)
-                .map_err(|e| Error::Config(format!("Cannot read private key file: {} - {}", file_path, e)))?
+                .map_err(|e| {
+                    Error::Config(format!(
+                        "Cannot read private key file: {} - {}",
+                        file_path, e
+                    ))
+                })?
                 .trim()
                 .to_string())
         } else {
-            Err(Error::Config("No private key configuration found".to_string()))
+            Err(Error::Config(
+                "No private key configuration found".to_string(),
+            ))
         }
     }
 
@@ -364,7 +459,10 @@ impl DexClient {
                 info!("Native Balance: {:.6} {}", balance, currency);
                 let min_required = config.trading.min_native_balance;
                 if balance < min_required {
-                    warn!("LOW BALANCE: {:.6} {} below minimum {:.6}", balance, currency, min_required);
+                    warn!(
+                        "LOW BALANCE: {:.6} {} below minimum {:.6}",
+                        balance, currency, min_required
+                    );
                 }
             }
             Err(e) => error!("Failed to fetch native balance: {:?}", e),
@@ -374,8 +472,10 @@ impl DexClient {
             match client.get_network_fees().await {
                 Ok(fees) => {
                     if let Some(gas_price) = fees.gas_price_gwei {
-                        info!("Network Fees - Gas Price: {:.2} Gwei, Estimated Cost: ${:.4} {}",
-                            gas_price, fees.estimated_fee_usd, fees.fee_currency_symbol);
+                        info!(
+                            "Network Fees - Gas Price: {:.2} Gwei, Estimated Cost: ${:.4} {}",
+                            gas_price, fees.estimated_fee_usd, fees.fee_currency_symbol
+                        );
                     }
                 }
                 Err(e) => warn!("Could not fetch current network fees: {:?}", e),
@@ -397,19 +497,29 @@ impl DexClient {
                     }
                 }
             }
-            Err(_) => info!("Token balance checking not supported for network: {}", network_name),
+            Err(_) => info!(
+                "Token balance checking not supported for network: {}",
+                network_name
+            ),
         }
     }
 
     pub fn log_paper_trading_info(&self) {
         match self {
-            DexClient::SolanaPaper { simulated_sol_balance, simulated_base_token_balance } => {
+            DexClient::SolanaPaper {
+                simulated_sol_balance,
+                simulated_base_token_balance,
+            } => {
                 info!(
                     "Paper trading mode: SOL={:.2}, base_token={:.2} (simulated - no real funds)",
                     simulated_sol_balance, simulated_base_token_balance
                 );
             }
-            DexClient::Paper { simulated_eth_balance, simulated_weth_balance, .. } => {
+            DexClient::Paper {
+                simulated_eth_balance,
+                simulated_weth_balance,
+                ..
+            } => {
                 info!(
                     "Paper trading mode: native={:.2}, base_token={:.2} (simulated - no real funds)",
                     simulated_eth_balance, simulated_weth_balance

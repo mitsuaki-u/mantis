@@ -29,8 +29,8 @@ pub enum LogTarget {
     Both(PathBuf),
 }
 
-/// HoneyBadgerLogger is our custom logger implementation
-pub struct HoneyBadgerLogger {
+/// MantisLogger is our custom logger implementation
+pub struct MantisLogger {
     /// The minimum level to log
     level: LevelFilter,
     /// How logs are formatted
@@ -45,7 +45,7 @@ pub struct HoneyBadgerLogger {
     module_levels: Vec<(String, LevelFilter)>,
 }
 
-impl Log for HoneyBadgerLogger {
+impl Log for MantisLogger {
     fn enabled(&self, metadata: &Metadata) -> bool {
         let level_enabled = metadata.level() <= self.level;
         if !level_enabled {
@@ -124,7 +124,7 @@ impl Log for HoneyBadgerLogger {
     }
 }
 
-impl HoneyBadgerLogger {
+impl MantisLogger {
     /// Create a new logger with the specified configuration.
     /// File opening is attempted here.
     pub fn new(
@@ -244,7 +244,7 @@ pub fn init_logger(
         LevelFilter::Warn,
     )];
 
-    let logger_instance = HoneyBadgerLogger::new(
+    let logger_instance = MantisLogger::new(
         level,
         LogFormat::Json, // Default to JSON for better analysis
         initial_target,  // Pass the configured intent

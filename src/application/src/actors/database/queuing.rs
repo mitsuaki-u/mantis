@@ -21,7 +21,7 @@ pub fn create_queue(config: &Arc<Config>) -> Option<PositionUpdateQueue> {
     }
 
     if let Some(redis_url) = &config.cache.redis_url {
-        let app_name = "honeybadger";
+        let app_name = "mantis";
 
         match PositionUpdateQueue::new(redis_url, "position_updates", app_name) {
             Ok(queue) => {

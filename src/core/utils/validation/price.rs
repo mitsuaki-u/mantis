@@ -108,13 +108,8 @@ pub fn validate_price_discrepancy(
     // Calculate percentage discrepancy: |blockchain - external| / external * 100
     let price_diff = (blockchain_price - external_api_price).abs();
     let discrepancy_percentage = if external_api_price > Decimal::ZERO {
-        match crate::core::utils::decimal_to_f64(
-            price_diff / external_api_price,
-            "price discrepancy",
-        ) {
-            Ok(val) => val,
-            Err(_) => f64::MAX, // Conversion failed, treat as maximum discrepancy
-        }
+        crate::core::utils::decimal_to_f64(price_diff / external_api_price, "price discrepancy")
+            .unwrap_or(f64::MAX)
     } else {
         f64::MAX // Invalid external price
     };

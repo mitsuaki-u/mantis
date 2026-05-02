@@ -82,10 +82,7 @@ impl FlushManager {
         let pending_tokens = self.get_pending_flush_tokens().await?;
 
         // Combine lists, ensuring priority tokens are flushed first
-        let mut all_tokens: Vec<_> = priority_tokens
-            .into_iter()
-            .chain(pending_tokens.into_iter())
-            .collect();
+        let mut all_tokens: Vec<_> = priority_tokens.into_iter().chain(pending_tokens).collect();
         all_tokens.dedup(); // Remove duplicates if a token was in both
 
         if all_tokens.is_empty() {
