@@ -1,206 +1,319 @@
-# Mantis Trading Bot
+# Mantis
 
-[![CI](https://github.com/yourusername/mantis/actions/workflows/ci.yml/badge.svg)](https://github.com/yourusername/mantis/actions/workflows/ci.yml)
+[![CI](https://github.com/mitsuaki-u/mantis/actions/workflows/ci.yml/badge.svg)](https://github.com/mitsuaki-u/mantis/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org)
+[![Tests](https://img.shields.io/badge/tests-151%20passing-brightgreen.svg)](#testing-and-ci)
+[![Clippy](https://img.shields.io/badge/clippy-zero%20warnings-brightgreen.svg)](#testing-and-ci)
 
-An automated Uniswap V3 trading bot built in Rust. Discovers tokens via on-chain data, runs technical-indicator strategies, enforces risk limits, and executes swaps — in paper or live mode.
+A Rust trading framework with trait-based customizable strategies and DEX backends, a supervised actor architecture, and an LLM advisor that audits every trade decision.
 
-## 🎯 Project Status
+> **31,000 lines of Rust** · **151 unit tests** · **0 clippy warnings** · **~$0.001 per AI signal** · **<500ms AI latency**
 
-**Paper trading**: fully functional
-**Live trading**: implemented and tested at small scale — use with caution and at your own risk
-
-## ✨ Features
-
-### Strategies
-- **Momentum** — composite signal from RSI, MACD, Bollinger Bands, and volume
-- **RSI** — oversold/overbought entries and exits
-- Configurable indicator weights and profiles per timeframe
-
-### Risk Management
-- Stop-loss, take-profit, and trailing stop
-- Per-position and portfolio-level exposure limits
-- Volatility filter, max drawdown, and daily loss halts
-- Gas cost protection (absolute USD + percentage of trade)
-- On-chain price validation before every trade (rejects stale subgraph data)
-
-### Technical
-- Actor model architecture (concurrent scanning, strategy, risk, execution)
-- PostgreSQL for trade/position persistence
-- Paper trading simulates fees and slippage realistically
-- Structured JSON logs, CI with zero warnings
-
-## ⚙️ How It Works
-
-1. **Discover** — queries the Uniswap V3 subgraph for pools filtered by TVL, volume, liquidity, and age
-2. **Analyse** — builds indicator time series (RSI, MACD, Bollinger, volume trend); no signals until warmup completes
-3. **Validate** — risk manager checks position limits, exposure, drawdown, gas cost, and on-chain price vs subgraph price
-4. **Execute** — paper: simulates swap and records position; live: wraps ETH→WETH, executes Uniswap V3 swap, polls for receipt
-5. **Manage** — monitors open positions every cycle; exits on stop-loss, take-profit, trailing stop, or max hold time
-
-## 🚀 Quick Start
-
-### Prerequisites
-
-- Rust 1.70+ (`rustup install stable`)
-- PostgreSQL 12+
-- Alchemy API key — [alchemy.com](https://www.alchemy.com) (free tier works)
-- Satsuma subgraph URL — [app.satsuma.xyz](https://app.satsuma.xyz) (free — deploy the Uniswap V3 subgraph)
-
-### Installation
-
-**1. Clone and build:**
-```bash
-git clone https://github.com/yourusername/mantis.git
-cd mantis
-cargo build --release
+```
+   AIAdvisor analysing BUY for JUPyiwrYJF (RSI=21.8)
+   AI REJECTED JUPyiwrYJF (85%) — RSI at 21.8 is excessively oversold
+   (potential trap), momentum score of 3.40 is weak, and -7.5% decline
+   lacks reversal confirmation; wait for RSI recovery above 30 or volume
+   surge before entry.
 ```
 
-> Add `./target/release` to your `PATH` to use `mantis` directly instead of `./target/release/mantis`.
+Mantis sends every BUY through Claude before executing. The reasoning is stored with the trade and printed in the logs.
 
-**2. Set up PostgreSQL:**
+## Why this exists
+
+This is a portfolio project. The interesting bits:
+
+1. **Chain-agnostic core, multiple DEX backends.** The strategy, risk, and indicator layers don't know which chain they're on. Ethereum (Uniswap V3 live + paper) and Solana (DexScreener, paper only) plug in behind the same trait. 
+
+2. **Supervised actors over a single futures pipeline.** Concurrent scanning, strategy evaluation, AI review, risk enforcement, and execution each run as isolated actors over a typed event bus. A supervisor watches them and can recover individual actors without restarting the process.
+
+3. **LLM as a structured second opinion.** The AI advisor receives indicator values, portfolio state, and returns a parseable APPROVE/REJECT with confidence and one-sentence reasoning. Prompt caching keeps each call ~$0.001. 
+
+## Architecture
+
+```mermaid
+%%{init: {'theme':'base', 'themeVariables': {
+  'primaryColor':'#1e293b',
+  'primaryTextColor':'#f1f5f9',
+  'primaryBorderColor':'#475569',
+  'lineColor':'#94a3b8',
+  'secondaryColor':'#334155',
+  'tertiaryColor':'#0f172a',
+  'tertiaryTextColor':'#f1f5f9',
+  'tertiaryBorderColor':'#475569',
+  'fontFamily':'ui-monospace, Menlo, monospace'
+}}}%%
+flowchart LR
+    DEX[/"DEX feed<br/>Solana · Ethereum"/]
+    LLM([Claude API])
+    DB[("Postgres<br/>audit log")]
+
+    subgraph Actors["Supervised Actor System"]
+        direction LR
+        M["MarketData<br/>Actor"]
+        S["Strategy<br/>Actor"]
+        AI["AIAdvisor<br/>Actor"]
+        R["RiskManager<br/>Actor"]
+        E["Execution<br/>Actor"]
+    end
+
+    DEX -->|prices| M
+    M -->|MarketEvent| S
+    S -->|"Signal::Buy<br/>+ indicators"| AI
+    AI <-->|prompt + decision| LLM
+    AI -->|"approved<br/>+ reasoning"| R
+    S -.->|"Signal::Sell<br/>(skip AI)"| R
+    R -->|TradeApproved| E
+    E -->|swap| DEX
+
+    M & S & AI & R & E -.->|events| DB
+
+    classDef external fill:#0ea5e9,stroke:#0284c7,color:#f0f9ff,stroke-width:2px
+    classDef storage fill:#16a34a,stroke:#15803d,color:#f0fdf4,stroke-width:2px
+
+    class DEX,LLM external
+    class DB storage
+```
+
+A `SupervisorActor` watches every actor for liveness and can restart them independently. An `EventRouter` does typed pub/sub, so actors never call each other directly. Every interaction is a typed event flowing through the bus. The database listens to all event types for audit and persistence.
+
+SELL signals (stop-loss, take-profit, trailing stop) bypass the AI advisor and go straight to risk, so exits never wait on an external API.
+
+### Signal flow on a BUY decision
+
+```mermaid
+%%{init: {'theme':'base', 'themeVariables': {
+  'actorBkg':'#1e293b',
+  'actorBorder':'#475569',
+  'actorTextColor':'#f1f5f9',
+  'actorLineColor':'#94a3b8',
+  'signalColor':'#94a3b8',
+  'signalTextColor':'#1e293b',
+  'sequenceNumberColor':'#0ea5e9',
+  'noteBkgColor':'#fbbf24',
+  'noteTextColor':'#0f172a',
+  'noteBorderColor':'#f59e0b',
+  'activationBkgColor':'#0ea5e9',
+  'activationBorderColor':'#0284c7',
+  'fontFamily':'ui-monospace, Menlo, monospace'
+}}}%%
+sequenceDiagram
+    autonumber
+    participant Mkt as Market
+    participant Str as Strategy
+    participant AI as AIAdvisor
+    participant LLM as Claude
+    participant Rsk as Risk
+    participant Exe as Execution
+
+    Mkt->>Str: PriceUpdate(token, price, volume)
+    Note over Str: append to PriceTimeSeries
+    Str->>Str: analyze_for_entry → Buy
+    Note over Str: snapshot RSI, BB%, momentum
+    Str->>AI: Signal + IndicatorSnapshot
+    AI->>LLM: prompt(indicators, portfolio)
+    LLM-->>AI: APPROVE 78% — "oversold +<br/>positive momentum"
+    AI->>Rsk: SignalAnalysed(approved=true)
+    Note over Rsk: check limits, size position
+    Rsk->>Exe: TradeApproved
+    Exe->>Exe: execute swap, record position
+```
+
+Every signal carries a UUID `correlation_id` so a single trade can be traced through Strategy → AIAdvisor → Risk → Execution → Database.
+
+## Quick start (paper mode)
+
 ```bash
+# Build
+cargo build --release
+
+# Postgres (one-time)
 psql postgres -c "CREATE ROLE mantis WITH LOGIN;"
 psql postgres -c "CREATE DATABASE mantis OWNER mantis;"
+
+# Configure (Solana paper trading + AI advisor)
+./target/release/mantis config set solana.rpc_url https://mainnet.helius-rpc.com/?api-key=YOUR_KEY
+./target/release/mantis config set anthropic_api_key sk-ant-api03-...
+
+# Run
+./target/release/mantis trading start --strategy momentum --interval 15 --indicator-profile scalping
 ```
 
-**3. Set your API key** (creates the config file on first run):
-```bash
-./target/release/mantis config set-key alchemy YOUR_ALCHEMY_KEY
-```
-
-**4. Set your subgraph URL:**
-```bash
-./target/release/mantis config set dex.subgraph_url YOUR_SATSUMA_URL
-```
-
-**5. Verify:**
-```bash
-./target/release/mantis config show
-./target/release/mantis config path   # exact config file location on your system
-```
-
-### Paper Trading
+In a separate terminal:
 
 ```bash
-./target/release/mantis trading start --strategy momentum --interval 60 --indicator-profile day_trading
-```
-
-> ⏳ **Warmup**: the momentum strategy collects ~50 minutes of price data before generating signals. The bot is working — it's just building its dataset.
-
-```bash
-# In a separate terminal
 ./target/release/mantis trading status
 ./target/release/mantis trading positions
 ./target/release/mantis trading history
-
-# Stop the bot
 ./target/release/mantis trading stop
 ```
 
-### Live Trading
+The `anthropic_api_key` can also come from the `ANTHROPIC_API_KEY` environment variable (config takes precedence). Without an Anthropic key the bot still runs, the AI advisor logs a warning at startup and signals pass through unmodified.
 
-> ⚠️ Use a **dedicated wallet** funded with only what you're willing to lose. Never your main wallet.
+## Configuration
 
-**1. Export your wallet private key** (never put this in the config file):
+Default config location:
+
+- macOS: `~/Library/Application Support/mantis/config.json`
+- Linux: `~/.config/mantis/config.json`
+
 ```bash
-export MANTIS_PRIVATE_KEY=0xYOUR_PRIVATE_KEY
+mantis config show
+mantis config path
 ```
 
-**2. Point the config to that env var:**
-```bash
-./target/release/mantis config set dex.wallet.private_key_env MANTIS_PRIVATE_KEY
+Full reference: see [CONFIGURATION.md](CONFIGURATION.md). Architecture detail: see [docs/architecture.md](docs/architecture.md).
+
+## Strategies are a trait
+
+`TradingStrategy` is the interface; `MomentumStrategy` and `RsiStrategy` are example implementations. Adding a new strategy is one file:
+
+```rust
+pub trait TradingStrategy: fmt::Display + Send + Sync + 'static {
+    fn name(&self) -> &str;
+    fn analyze_for_entry(&self, token: &TokenMetrics) -> bool;
+    fn analyze_for_exit(&self, token: &TokenMetrics, position: Option<&Position>,
+                        risk_params: Option<(f64, f64)>) -> Option<ExitReason>;
+    fn indicator_profile(&self) -> IndicatorProfile;
+    fn indicator_weights(&self) -> IndicatorWeights { /* default */ }
+    fn price_series_for(&self, token_id: &str) -> Option<PriceTimeSeries>;
+    /* ... cooldown, min volume, stop-loss accessors ... */
+}
 ```
 
-**3. Set conservative limits:**
-```bash
-./target/release/mantis config set trading.max_positions 1
-./target/release/mantis config set trading.max_position_size 50.0
-./target/release/mantis config set trading.max_total_exposure 50.0
+Implement those methods, register the new variant in the factory, and the rest of the pipeline picks it up automatically. The actor layer doesn't know which strategy is running, it operates on the trait. 
+
+### Why have strategies at all when an LLM could just look at the data?
+
+Cost. A market scan polls ~150 tokens every 15s, which is tens of thousands of evaluations per hour. RSI runs in microseconds and is free. An LLM call is ~$0.001 and ~500ms. Routing every tick through Claude would cost hundreds of dollars per day for the same job. Strategies act as a deterministic, microsecond-latency pre-filter. The LLM is invoked only on the small fraction of signals worth a second opinion, keeping API costs at ~$1/day.
+
+Strategy gates filter for what matters; the AI adds context the indicators alone don't capture.
+
+## AI Advisor
+
+Sits between the strategy layer and the risk layer. On every BUY signal it asks Claude for an APPROVE or REJECT given the indicators and portfolio state, then attaches the reasoning to the decision event.
+
+### What Claude sees on each signal
+
+```
+TOKEN: BONK (DezXAZ8z)
+SIGNAL: BUY
+STRATEGY: Momentum
+
+TECHNICAL INDICATORS:
+- RSI: 27.3 (oversold)
+- Bollinger position: 12% of band
+- Momentum score: 42.18
+- 24h price change: +3.4%
+- Price: $0.000012
+- 24h volume: $4200000
+
+PORTFOLIO STATE:
+- Open positions: 0/5
+- Daily P&L: +0.0%
 ```
 
-**4. Run:**
-```bash
-MANTIS_PRIVATE_KEY=0x... ./target/release/mantis trading start --live
+### What Claude returns
+
+```
+DECISION: APPROVE
+CONFIDENCE: 78
+REASONING: RSI oversold at 27 with positive momentum and bullish 24h
+  trend supports entry with full portfolio headroom.
 ```
 
-Your wallet needs ~0.1 ETH to cover gas. The bot wraps ETH→WETH automatically before each buy.
+### Implementation details
 
-## 📊 Configuration
+- Model: `claude-haiku-4-5-20251001` (fastest and cheapest tier)
+- Prompt caching on the static system prompt cuts input cost ~90%
+- Indicator values come from a snapshot taken at signal-publication time using the strategy's own time series, so Claude sees the same numbers the strategy used to decide
+- Cost: ~$0.001 per signal
+- Latency: ~500ms typical, 3s timeout, fails open with confidence 50 if Claude is unreachable
+- Response parsing handles formatting variations: lowercase keywords, missing fields, malformed responses. See `src/infrastructure/ai/claude.rs::parse_decision`.
 
-Config file location (run `mantis config path` to confirm):
-- **macOS**: `~/Library/Application Support/mantis/config.json`
-- **Linux**: `~/.config/mantis/config.json`
-- **Windows**: `%APPDATA%\mantis\config.json`
+## Strategies and risk
 
-For all options see [CONFIGURATION.md](CONFIGURATION.md).
+### Strategies
 
-### Indicator Profiles
+These following example implementations are meant to demonstrate the framework, not vetted trading algorithms, use at your own risk.
 
-| Profile | Scan interval | Warmup | Best for |
+- **Momentum**: composite score over RSI, MACD, Bollinger Bands, and volume trend; configurable weights per indicator
+- **RSI**: oversold/overbought entries and exits with configurable thresholds
+
+Both strategies share an `IndicatorProfile` (Scalping, DayTrading, SwingTrading, Standard) that sets the periods used for each indicator. Strategy logic is independent of chain.
+
+
+### Risk management
+
+- Stop-loss, take-profit, trailing stop
+- Per-position and portfolio-level exposure limits
+- Volatility filter, max drawdown, daily loss halt
+- Gas/fee protection (absolute USD floor + percentage-of-trade ceiling)
+- On-chain price validation before live execution
+
+## Testing and CI
+
+- **151 unit tests** across strategies, indicators, risk assessment, financial calculations, validation, and AI response parsing
+- CI pipeline (`.github/workflows/ci.yml`) enforces:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets -- -D warnings`
+  - `cargo test --lib`
+- Coverage focuses on pure-logic core modules. 
+
+### Indicator profiles
+
+| Profile | Scan interval | Warmup | Use case |
 |---|---|---|---|
-| `scalping` | 5–30s | 40 min | High-frequency |
-| `day_trading` | 60s | 50 min | **Recommended default** |
-| `swing_trading` | 120s | 57 min | Position trading |
-| `standard` | 300s+ | 71 min | Traditional TA |
-
-```bash
-mantis config set trading.indicator_profile day_trading
-mantis config set data_collection.scan_interval_secs 60
-```
+| `scalping` | 5–30s | ~30 candles | High-frequency entries |
+| `day_trading` | 60s | ~50 candles | Default |
+| `swing_trading` | 120s | ~57 candles | Position trading |
+| `standard` | 300s+ | ~71 candles | Traditional TA |
 
 ### Logging
 
 ```bash
-# Recommended — info only, suppress DB noise
 RUST_LOG=mantis=info,tokio_postgres=warn ./target/release/mantis trading start
-
-# Verbose
-RUST_LOG=mantis=debug,tokio_postgres=warn ./target/release/mantis trading start
 ```
 
-## 🧪 Testing
+Logs are structured JSON. The bot prints these key event lines on every BUY signal:
+
+```
+  Generated BUY signal for X
+  Signal indicators for X: RSI=..., BB%=..., Momentum=...
+  AIAdvisor analysing BUY for X (RSI=...)
+  AI APPROVED X (78%) — ...   (or)    AI REJECTED X (40%) — ...
+```
+
+## Live trading (Ethereum)
+
+> ⚠️ Use a dedicated wallet funded with only what you're willing to lose. Never your main wallet.
+
+Currently only Ethereum has a live execution path (Uniswap V3 swaps). Solana live execution via Jupiter is on the roadmap; paper mode is the recommended default for Solana today.
 
 ```bash
-cargo test --lib                      # run all 137 unit tests
-cargo test --lib position_sizing      # run tests matching a name
+export MANTIS_PRIVATE_KEY=0xYOUR_PRIVATE_KEY
+mantis config set dex.wallet.private_key_env MANTIS_PRIVATE_KEY
+mantis config set trading.max_positions 1
+mantis config set trading.max_position_size 50.0
+MANTIS_PRIVATE_KEY=0x... mantis trading start --live
 ```
 
-**Coverage**: position sizing, portfolio risk limits, stop-loss/take-profit/trailing stop, gas validation, RSI/momentum signal logic, on-chain price discrepancy detection.
+The wallet needs ~0.1 ETH for gas. The bot wraps ETH→WETH automatically before each buy.
 
-## 🐛 Known Limitations
+## Roadmap
 
-- **Warmup required** — no trades fire until enough candles are collected (40–71 min depending on profile)
-- **Ethereum mainnet only** — Uniswap V3, WETH as base token
-- **One strategy at a time** — one strategy type per bot instance
-- **No backtesting** — no built-in historical simulation
-- **Postgres TLS** — currently `NoTls`; requires `tokio-postgres-rustls` to enable
+What's not implemented yet, in rough priority order:
 
-## 📚 Documentation
+- **Solana live execution** via Jupiter swap API (paper mode works today)
+- **Web dashboard** for visualising AI decisions and trade history
+- **Additional strategies** beyond momentum and RSI
+- **Actor integration tests** to complement the existing unit tests
 
-- [CONFIGURATION.md](CONFIGURATION.md) — full config reference
-- [docs/architecture.md](docs/architecture.md) — actor model, trading pipeline, component detail
+## License
 
-## 🛠️ Development
+MIT. See [LICENSE](LICENSE).
 
-```bash
-cargo fmt                  # format
-cargo clippy -- -D warnings  # lint (zero warnings enforced in CI)
-cargo test --lib           # test
-cargo check --all-targets  # type check
-```
+## Disclaimer
 
-## 🤝 Contributing
-
-Feedback, bug reports, and PRs are welcome. Some areas that would benefit from contributions:
-- Backtesting framework
-- Additional strategies
-- Multi-chain support (Arbitrum, Base)
-- Web dashboard
-
-## ⚠️ Disclaimer
-
-This software is provided for educational purposes. Trading bots can and do lose money. Gas fees can exceed profits. Smart contracts carry risk. You are solely responsible for any funds used with this software.
-
----
-
-**Built with Rust** 🦀 | **Uniswap V3** 🦄 | **Alchemy** ⚗️
+This software is provided for educational purposes. You are solely responsible for any funds used with this software.

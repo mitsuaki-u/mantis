@@ -1,588 +1,415 @@
-# Configuration Guide
+# Configuration Reference
 
-This document describes all configuration options for the Mantis trading bot.
+Every configuration option, what it does, and how to set it. Pairs with the high-level overview in [README.md](README.md) and the actor-system detail in [docs/architecture.md](docs/architecture.md).
 
-## Configuration File Location
+## Quick navigation
 
-- **Linux/macOS**: `~/.config/mantis/config.json`
-- **Windows**: `%APPDATA%\mantis\config.json`
+- [File location](#file-location) · [Priority](#configuration-priority) · [Environment variables](#environment-variables)
+- Sections: [`api_keys`](#api_keys) · [`anthropic_api_key`](#anthropic_api_key) · [`trading`](#trading) · [`database`](#database) · [`data_collection`](#data_collection) · [`logs`](#logs) · [`rpc`](#rpc) · [`dex`](#dex) · [`cache`](#cache) · [`solana`](#solana)
+- [CLI commands](#cli-commands) · [Common setups](#common-setups)
 
-## Configuration Priority
+## File location
 
-Configuration values are loaded in the following priority order (highest to lowest):
+Default path:
 
-1. **Environment variables** (highest priority)
-2. **Configuration file**
-3. **Default values** (lowest priority)
+| Platform | Path |
+|---|---|
+| macOS | `~/Library/Application Support/mantis/config.json` |
+| Linux | `~/.config/mantis/config.json` |
+| Windows | `%APPDATA%\mantis\config.json` |
 
-## Environment Variables
+Run `mantis config path` to see the exact path on your system. The file is created automatically the first time you run `mantis config set ...`.
 
-### API Keys
+## Configuration priority
 
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `MANTIS_INFURA_KEY` | Infura RPC API key | `1234567890abcdef...` |
-| `MANTIS_ALCHEMY_KEY` | Alchemy RPC API key | `abcdef1234567890...` |
+Sources are merged in this order (later overrides earlier):
 
-### Cache
+1. Built-in defaults
+2. Configuration file
+3. Environment variables (only for fields that support env override — see below)
+4. CLI flags passed to `mantis trading start`
 
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `REDIS_URL` | Redis connection URL | `redis://localhost:6379` |
+For most fields, the config file is authoritative. Env vars are limited to a small set — see the env vars section.
 
-### Wallet (for live trading)
+## Environment variables
 
-Configure wallet via the config file `dex.wallet` section (see below).
+Only these fields support env-var override:
 
-## Configuration File Structure
+| Variable | Description | Maps to |
+|---|---|---|
+| `MANTIS_ALCHEMY_KEY` | Ethereum RPC API key | `api_keys.alchemy` |
+| `MANTIS_INFURA_KEY` | Ethereum RPC API key (alternative) | `api_keys.infura` |
+| `MANTIS_PRIVATE_KEY` | Ethereum wallet private key | Resolved via `dex.wallet.private_key_env` |
+| `ANTHROPIC_API_KEY` | Claude API key for the AI advisor | `anthropic_api_key` |
+| `REDIS_URL` | Redis connection URL | `cache.redis_url` |
+| `RUST_LOG` | Log level | Standard `env_logger` filter |
+
+Anthropic key precedence: if both `anthropic_api_key` (config) and `ANTHROPIC_API_KEY` (env) are set, **config wins**. Empty strings count as missing.
+
+## Configuration file structure
+
+Top-level JSON shape:
 
 ```json
 {
-  "api_keys": { ... },
-  "trading": { ... },
-  "database": { ... },
-  "api": { ... },
-  "data_collection": { ... },
-  "logs": { ... },
-  "rpc": { ... },
-  "dex": { ... },
-  "cache": { ... }
+  "api_keys":          { ... },
+  "anthropic_api_key": "sk-ant-api03-...",
+  "trading":           { ... },
+  "database":          { ... },
+  "data_collection":   { ... },
+  "logs":              { ... },
+  "rpc":               { ... },
+  "dex":               { ... },
+  "cache":             { ... },
+  "solana":            { ... }
 }
 ```
+
+Every section is optional — defaults fill in anything you don't set.
 
 ---
 
-## API Keys Configuration
+## `api_keys`
+
+Ethereum RPC provider keys. Both are optional; the bot uses whichever is present.
 
 ```json
-{
-  "api_keys": {
-    "infura": "your_infura_api_key",
-    "alchemy": "your_alchemy_api_key"
-  }
+"api_keys": {
+  "infura":  null,
+  "alchemy": "..."
 }
 ```
 
-### CLI Commands
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `infura` | string \| null | `null` | Infura API key |
+| `alchemy` | string \| null | `null` | Alchemy API key |
 
+**Set via CLI**:
 ```bash
-# Set Alchemy API key
 mantis config set-key alchemy YOUR_ALCHEMY_KEY
-
-# Set Infura API key
 mantis config set-key infura YOUR_INFURA_KEY
 ```
 
-**Note**: At least one RPC provider key (Alchemy or Infura) is required.
+Or via environment: `MANTIS_ALCHEMY_KEY`, `MANTIS_INFURA_KEY`.
+
+## `anthropic_api_key`
+
+Top-level field (not nested). Required for the AI advisor; without it, signals pass through unmodified and a warning is logged at startup.
+
+```json
+"anthropic_api_key": "sk-ant-api03-..."
+```
+
+**Set via CLI**:
+```bash
+mantis config set anthropic_api_key sk-ant-api03-...
+```
+
+Or via environment:
+```bash
+export ANTHROPIC_API_KEY=sk-ant-api03-...
+```
+
+Get a key at [console.anthropic.com](https://console.anthropic.com). Note: API credits are billed separately from Claude.ai subscriptions — see the README for details.
 
 ---
 
-## Trading Configuration
+## `trading`
 
-Controls bot trading behavior, risk management, and strategy parameters.
+The largest config section. Strategy choice, risk limits, indicator weights, gas protection.
 
-```json
-{
-  "trading": {
-    "live_trading": false,
-    "max_position_size": 100.0,
-    "min_position_size": 10.0,
-    "max_total_exposure": 1000.0,
-    "strategy": "momentum",
-    "signal_confidence_threshold": 0.65,
-    "indicator_profile": "day_trading",
-    "min_volume": 50000.0,
-    "min_liquidity": 100000.0,
-    "min_pool_transaction_count": 500,
-    "stop_loss": 5.0,
-    "take_profit": 10.0,
-    "max_positions": 5,
-    "max_volatility_24h": 30.0,
-    "rsi_weight": 0.3,
-    "macd_weight": 0.3,
-    "bollinger_weight": 0.25,
-    "volume_weight": 0.15,
-    "max_tokens_to_scan": 150,
-    "max_daily_loss": 10.0,
-    "max_drawdown": 20.0,
-    "max_trade_risk_pct": 2.0,
-    "min_eth_balance": 0.1,
-    "tokens_to_track": [],
-    "market_data_provider": "alchemy_uniswap_v3",
-    "max_gas_cost_usd": 10.0,
-    "max_gas_cost_percentage": 5.0,
-    "transaction_priority": "Standard",
-    "max_execution_price_deviation": 0.05,
-    "min_portfolio_risk_factor": 0.3
-  }
-}
-```
+### Mode and strategy
 
-### Trading Options
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `live_trading` | bool | `false` | When `true`, executes real swaps. Defaults to paper mode. |
+| `strategy` | string | `"momentum"` | Strategy type. Supported: `"momentum"`, `"rsi"`. |
+| `signal_confidence_threshold` | f64 (0.0-1.0) | `0.65` | Minimum strategy score to fire a BUY signal. |
+| `indicator_profile` | string | `"day_trading"` | Indicator period preset. One of: `"scalping"`, `"day_trading"`, `"swing_trading"`, `"standard"`. |
+| `market_data_provider` | string | `"dexscreener_solana"` | Token discovery and pricing provider. |
 
-#### Mode & Position Sizing
+### Position sizing
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `live_trading` | bool | `false` | Enable live trading with real funds. Leave `false` for paper trading (default). |
-| `max_position_size` | float | `100.0` | Maximum USD value per trade position |
-| `min_position_size` | float | `10.0` | Minimum USD value per trade position |
-| `max_total_exposure` | float | `1000.0` | Maximum total USD value across all positions |
-| `max_positions` | int | `5` | Maximum number of concurrent positions |
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `max_position_size` | f64 (USD) | `50.0` | Maximum size of a single position. |
+| `min_position_size` | f64 (USD) | `20.0` | Minimum size of a single position. |
+| `max_total_exposure` | f64 (USD) | `1000.0` | Maximum total open exposure across all positions. |
+| `max_positions` | usize | `5` | Maximum number of concurrent open positions. |
 
-#### Strategy Selection
+### Market filters
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `strategy` | string | `"momentum"` | Trading strategy: `"momentum"` or `"rsi"` |
-| `signal_confidence_threshold` | float | `0.65` | Minimum confidence (0.0-1.0) to trigger a trade |
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `min_volume` | f64 (USD) | `1_000_000.0` | Drop tokens with 24h volume below this. |
+| `min_liquidity` | f64 (USD) | `100_000.0` | Drop tokens with pool liquidity below this. |
+| `min_pool_transaction_count` | u32 | `1000` | (Ethereum) drop pools with fewer than this many lifetime transactions. |
+| `max_volatility_24h` | f64 (%) | `30.0` | Drop tokens whose 24h price change exceeds this. Set high to disable. |
+| `max_tokens_to_scan` | usize | `150` | Max tokens evaluated per scan cycle (`0` = unlimited). |
+| `tokens_to_track` | array of strings | `[]` | If non-empty, only track these specific tokens (mints/addresses). |
 
-#### Indicator Configuration (for momentum strategy)
+### Exit conditions
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `indicator_profile` | string | `"day_trading"` | Preset that auto-configures indicator periods for your trading style |
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `stop_loss` | f64 (%) | `5.0` | Close position if it drops more than this from entry. |
+| `take_profit` | f64 (%) | `10.0` | Close position if it gains more than this from entry. |
 
-**Indicator Profile Presets:**
+### Risk management
 
-The `indicator_profile` option automatically optimizes all indicator periods (RSI, MACD, Bollinger Bands, Volume) based on your trading timeframe:
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `max_daily_loss` | f64 (%) | `10.0` | Halt new BUY signals once daily loss exceeds 80% of this threshold. |
+| `max_drawdown` | f64 (%) | `20.0` | Halt new BUY signals once drawdown from peak exceeds 80% of this. |
+| `max_trade_risk_pct` | f64 (%) | `5.0` | Maximum percentage of wallet a single trade can risk. |
+| `min_native_balance` | f64 (ETH or SOL) | `0.1` | Minimum native balance required to trade (alias: `min_eth_balance`). |
+| `min_portfolio_risk_factor` | f64 (0.0-1.0) | `0.3` | Halt new trades when portfolio risk factor drops below this. |
+| `max_execution_price_deviation` | f64 (0.0-1.0) | `0.05` | Reject trades if execution price differs from signal price by more than this fraction. |
 
-- `"scalping"` - Ultra-fast (5min scan interval)
-  - MACD: (5, 13, 4) - 40 min warmup
-  - Best for: High-frequency trading, 1-5 minute candles
+### Indicator weights (momentum strategy)
 
-- `"day_trading"` - Balanced (1min scan interval) **[DEFAULT]**
-  - MACD: (8, 17, 6) - 50 min warmup
-  - Best for: Active trading, 1-minute candles, 60s scan intervals
+Weights for the composite momentum score. Sum should equal 1.0; the bot doesn't enforce this but skewed weights tilt the signal.
 
-- `"swing_trading"` - Conservative (1-5min scan intervals)
-  - MACD: (10, 20, 7) - 57 min warmup
-  - Best for: Position trading, 5-15 minute candles
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `rsi_weight` | f64 (0.0-1.0) | `0.3` | RSI contribution. |
+| `macd_weight` | f64 (0.0-1.0) | `0.3` | MACD contribution. |
+| `bollinger_weight` | f64 (0.0-1.0) | `0.2` | Bollinger Bands contribution. |
+| `volume_weight` | f64 (0.0-1.0) | `0.2` | Volume trend contribution. |
 
-- `"standard"` - Traditional settings (5-15min scan intervals)
-  - MACD: (12, 26, 9) - 71 min warmup
-  - Best for: Slower timeframes, traditional TA
+### Gas / fee protection (Ethereum live only)
 
-**Recommendation**: Use `"day_trading"` with 60s scan intervals for optimal momentum trading.
-
-#### Indicator Weights (for momentum strategy)
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `rsi_weight` | float | `0.3` | RSI indicator weight (0.0-1.0) |
-| `macd_weight` | float | `0.3` | MACD indicator weight (0.0-1.0) |
-| `bollinger_weight` | float | `0.25` | Bollinger Bands weight (0.0-1.0) |
-| `volume_weight` | float | `0.15` | Volume indicator weight (0.0-1.0) |
-
-**Note**: Weights should sum to 1.0 for best results.
-
-#### Market Filters
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `min_volume` | float | `50000.0` | Minimum 24h USD volume to consider a token |
-| `min_liquidity` | float | `100000.0` | Minimum USD liquidity in trading pairs |
-| `min_pool_transaction_count` | int | `500` | Minimum transaction count for Uniswap V3 pools |
-| `max_tokens_to_scan` | int | `150` | Maximum tokens to scan per market update (0 = unlimited) |
-| `tokens_to_track` | array | `[]` | Specific token addresses to track (empty = use defaults) |
-
-#### Risk Management
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `stop_loss` | float | `5.0` | Stop loss percentage (e.g., `5.0` = -5%) |
-| `take_profit` | float | `10.0` | Take profit percentage (e.g., `10.0` = +10%) |
-| `max_volatility_24h` | float | `30.0` | Maximum allowed 24-hour price volatility percentage (0.0-100.0). Tokens exceeding this volatility will be skipped |
-| `max_daily_loss` | float | `10.0` | Maximum daily loss percentage before halting |
-| `max_drawdown` | float | `20.0` | Maximum drawdown percentage before halting |
-| `max_trade_risk_pct` | float | `2.0` | Maximum percentage of wallet to risk per trade |
-| `min_portfolio_risk_factor` | float | `0.3` | Minimum portfolio risk factor (0.0-1.0) before halting new trades |
-
-#### Gas Protection
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `max_gas_cost_usd` | float | `10.0` | Maximum USD to spend on gas per transaction |
-| `max_gas_cost_percentage` | float | `5.0` | Maximum gas cost as % of trade size |
-| `transaction_priority` | string | `"Standard"` | Gas priority: `"Low"`, `"Standard"`, `"High"`, `"Urgent"` |
-
-**Priority Multipliers**:
-- `"Low"`: 0.9x base gas price
-- `"Standard"`: 1.0x base gas price
-- `"High"`: 1.2x base gas price
-- `"Urgent"`: 1.5x base gas price
-
-#### Price Validation
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `max_execution_price_deviation` | float | `0.05` | Maximum price deviation from signal to execution (e.g., `0.05` = 5%) |
-
-#### Live Trading Requirements
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `min_eth_balance` | float | `0.1` | Minimum ETH balance required for gas fees |
-
-#### Market Data Provider
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `market_data_provider` | string | `"alchemy_uniswap_v3"` | Data provider: `"alchemy_uniswap_v3"` |
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `max_gas_cost_usd` | f64 (USD) | `4.0` | Reject trade if estimated gas exceeds this. |
+| `max_gas_cost_percentage` | f64 (%) | `15.0` | Reject trade if estimated gas exceeds this percentage of trade size. |
+| `transaction_priority` | string | `"Standard"` | Gas multiplier preset. One of: `"Low"` (0.9x), `"Medium"`, `"Standard"` (1.0x), `"High"` (1.2x), `"Urgent"` (1.5x). |
 
 ---
 
-## Database Configuration
+## `database`
 
-PostgreSQL database connection settings.
+PostgreSQL connection. Required.
 
 ```json
-{
-  "database": {
-    "host": "localhost",
-    "port": 5432,
-    "user": "mantis",
-    "password": "your_password",
-    "dbname": "mantis",
-    "pool_max_size": 10
-  }
+"database": {
+  "host":          "localhost",
+  "port":          5432,
+  "user":          "mantis",
+  "password":      null,
+  "dbname":        "mantis",
+  "pool_max_size": 10
 }
 ```
 
-### Database Options
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `host` | string | `"localhost"` | PostgreSQL host. |
+| `port` | u16 (1-65535) | `5432` | PostgreSQL port. |
+| `user` | string | `"mantis"` | PostgreSQL user (cannot be empty). |
+| `password` | string \| null | `null` | PostgreSQL password (uses peer/trust auth if null). |
+| `dbname` | string | `"mantis"` | Database name (cannot be empty). |
+| `pool_max_size` | usize (≥1) | `10` | Max connections in the pool. |
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `host` | string | `"localhost"` | PostgreSQL server hostname |
-| `port` | int | `5432` | PostgreSQL server port |
-| `user` | string | `"mantis"` | Database username |
-| `password` | string | `null` | Database password (optional for local dev) |
-| `dbname` | string | `"mantis"` | Database name |
-| `pool_max_size` | int | `10` | Maximum database connection pool size |
+Connection currently uses `NoTls`. Adding TLS requires the `tokio-postgres-rustls` crate — see the architecture doc's "Known Caveats."
 
-### Database Setup
+---
+
+## `data_collection`
+
+Market polling cadence and history retention.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `scan_interval_secs` | u64 (≥1) | `60` | How often to poll market data (in seconds). |
+| `history_days` | u64 (1-365) | `30` | Days of historical price data to retain. |
+| `auto_start` | bool | `true` | Start data collection immediately when the bot launches. |
+
+Tuning hint: `scan_interval_secs` should match your `indicator_profile`. Scalping wants 5-30s; day_trading 60s; swing_trading 120s.
+
+---
+
+## `logs`
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `directory` | string | platform-default cache dir | Where rotating log files are written. |
+
+Use `RUST_LOG` to control verbosity. Recommended:
 
 ```bash
-# Create database role and database
-psql postgres -c "CREATE ROLE mantis WITH LOGIN PASSWORD 'your_password';"
-psql postgres -c "CREATE DATABASE mantis OWNER mantis;"
+RUST_LOG=mantis=info,tokio_postgres=warn ./target/release/mantis trading start
 ```
 
 ---
 
-## Data Collection Configuration
+## `rpc`
 
-Controls market data scanning and history collection.
+Ethereum RPC provider settings. Used only when `dex.network` resolves to an EVM chain.
 
-```json
-{
-  "data_collection": {
-    "scan_interval_secs": 60,
-    "history_days": 30,
-    "auto_start": true
-  }
-}
-```
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `primary_provider` | string | `"alchemy"` | Primary RPC provider (`"alchemy"` or `"infura"`). |
 
-### Data Collection Options
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `scan_interval_secs` | int | `60` | Market scan interval in seconds (e.g., `60` = 1 minute, optimized for momentum strategy) |
-| `history_days` | int | `30` | Days of historical data to maintain (1-365) |
-| `auto_start` | bool | `true` | Automatically start data collection on bot startup |
+The bot uses the matching key from `api_keys` for RPC calls.
 
 ---
 
-## Logs Configuration
+## `dex`
+
+DEX backend for execution. The default is Solana (paper-only); set `network: "ethereum"` for Ethereum live execution.
 
 ```json
-{
-  "logs": {
-    "directory": "logs"
-  }
+"dex": {
+  "network":                      "solana",
+  "protocol":                     "jupiter",
+  "custom_rpc_url":               null,
+  "router_address":               null,
+  "weth_address":                 null,
+  "stablecoin_address":           null,
+  "wallet":                       null,
+  "paper_simulated_weth_balance": 10.0
 }
 ```
 
-### Logs Options
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `network` | string \| null | `"solana"` | Target chain. `"ethereum"` and `"solana"` are supported; `"ethereum"` enables live execution. |
+| `protocol` | string | `"jupiter"` | DEX protocol label. The CLI setter currently validates `"uniswap_v3"` only; the field is for display and forward-compat. |
+| `custom_rpc_url` | string \| null | `null` | Override the RPC endpoint. |
+| `router_address` | string \| null | `null` | Override the swap router contract (Ethereum). |
+| `weth_address` | string \| null | `null` | Override the WETH contract (Ethereum). |
+| `stablecoin_address` | string \| null | `null` | Override the stablecoin contract (Ethereum, USDC). |
+| `wallet` | object \| null | `null` | Wallet config for live trading. See below. |
+| `paper_simulated_weth_balance` | f64 | `10.0` | Starting WETH balance in Ethereum paper mode. |
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `directory` | string | `"logs"` | Directory path for log files |
-
----
-
-## RPC Configuration
-
-Ethereum RPC provider settings.
-
-```json
-{
-  "rpc": {
-    "primary_provider": "alchemy"
-  }
-}
-```
-
-### RPC Options
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `primary_provider` | string | `"alchemy"` | Primary RPC provider: `"alchemy"` or `"infura"` |
-
-**Note**: The bot automatically falls back to the secondary provider if the primary fails.
-
----
-
-## DEX Configuration
-
-Decentralized exchange and blockchain network settings.
+### `dex.wallet` (Ethereum live trading only)
 
 ```json
-{
-  "dex": {
-    "network": "ethereum",
-    "protocol": "uniswap_v3",
-    "subgraph_url": "https://subgraph.satsuma-prod.com/YOUR_KEY/YOUR_TEAM/uniswap-v3-mainnet/version/0.0.1/api",
-    "custom_rpc_url": null,
-    "router_address": null,
-    "weth_address": null,
-    "stablecoin_address": null,
-    "wallet": {
-      "private_key_env": "MANTIS_PRIVATE_KEY",
-      "private_key_file": null
-    },
-    "paper_simulated_weth_balance": 10.0
-  }
-}
-```
-
-### Getting a Subgraph URL
-
-Token discovery requires a Uniswap V3 subgraph endpoint. Get one free at [app.satsuma.xyz](https://app.satsuma.xyz):
-
-1. Sign up and create a new subgraph
-2. Search for "Uniswap V3" and deploy for Ethereum mainnet
-3. Copy the query URL and set it:
-
-```bash
-mantis config set dex.subgraph_url https://subgraph.satsuma-prod.com/YOUR_KEY/YOUR_TEAM/uniswap-v3-mainnet/version/0.0.1/api
-```
-
-The bot will panic on startup with a clear message if this is not configured.
-
-### DEX Options
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `subgraph_url` | string | required | Uniswap V3 subgraph query URL (see above) |
-| `network` | string | `"ethereum"` | Blockchain network: `"ethereum"`, `"sepolia"`, etc. |
-| `protocol` | string | `"uniswap_v3"` | DEX protocol to use |
-| `custom_rpc_url` | string | `null` | Optional custom RPC endpoint URL |
-| `router_address` | string | `null` | Optional custom router contract address |
-| `weth_address` | string | `null` | Optional custom WETH contract address |
-| `stablecoin_address` | string | `null` | Optional custom stablecoin contract address |
-
-### Paper Trading Options
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `paper_simulated_weth_balance` | float | `10.0` | Starting WETH balance for paper trading |
-
-### Wallet Configuration (Live Trading Only)
-
-⚠️ **WARNING**: Only configure a wallet if you intend to do **live trading with real funds**.
-
-```json
-{
+"dex": {
   "wallet": {
-    "private_key_env": "MANTIS_PRIVATE_KEY",
+    "private_key_env":  "MANTIS_PRIVATE_KEY",
     "private_key_file": null
   }
 }
 ```
 
-**Option 1: Environment Variable (Recommended)**
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `private_key_env` | string \| null | `null` | Name of the env var holding the hex-encoded private key. |
+| `private_key_file` | string \| null | `null` | Path to a file containing the hex-encoded private key. |
 
-Set `private_key_env` to the name of an environment variable containing your private key:
+The bot reads `private_key_env` first, then falls back to `private_key_file`. Never put a private key directly in the JSON — both options exist to keep secrets out of the config file.
+
+---
+
+## `cache`
+
+Redis is optional. Used for batched DB writes and token metadata cache. The bot degrades gracefully when Redis is unavailable.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `redis_url` | string | `"redis://127.0.0.1/"` | Redis connection URL. Override via `REDIS_URL` env var. |
+
+---
+
+## `solana`
+
+Solana network config. Used by Solana paper trading today; required for live execution once Jupiter integration lands.
+
+```json
+"solana": {
+  "rpc_url":      "https://mainnet.helius-rpc.com/?api-key=...",
+  "network":      "mainnet",
+  "keypair_path": null
+}
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `rpc_url` | string \| null | `null` | Solana RPC endpoint (Helius recommended). Currently optional — paper mode uses DexScreener directly. |
+| `network` | string | `"mainnet"` | Solana network. `"mainnet"` or `"devnet"`. |
+| `keypair_path` | string \| null | `null` | Path to a Solana keypair JSON file (planned, for live execution). |
+
+Get a free Helius RPC URL at [helius.dev](https://helius.dev) when Solana live execution is needed.
+
+---
+
+## CLI commands
 
 ```bash
-export MANTIS_PRIVATE_KEY="0x1234567890abcdef..."
-```
-
-**Option 2: File**
-
-Set `private_key_file` to a file path containing your private key:
-
-```json
-{
-  "wallet": {
-    "private_key_file": "/secure/path/to/private_key.txt"
-  }
-}
-```
-
-🔒 **Security Best Practices**:
-- Never commit private keys to version control
-- Use environment variables for production
-- Restrict file permissions: `chmod 600 private_key.txt`
-- Use a dedicated trading wallet, not your main wallet
-
----
-
-## Cache Configuration
-
-Optional Redis caching for improved performance (not required for paper trading).
-
-```json
-{
-  "cache": {
-    "enabled": false,
-    "redis_url": "redis://127.0.0.1/"
-  }
-}
-```
-
-### Cache Options
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `enabled` | bool | `false` | Enable Redis caching |
-| `redis_url` | string | `"redis://127.0.0.1/"` | Redis connection URL |
-
-**Note**: Caching is primarily beneficial for high-frequency trading or monitoring many tokens. For paper trading and low-frequency scans, it's unnecessary overhead.
-
----
-
-## Example Configurations
-
-### Minimal Paper Trading Setup
-
-```json
-{
-  "api_keys": {
-    "alchemy": "YOUR_ALCHEMY_KEY"
-  },
-  "trading": {
-    "live_trading": false,
-    "max_position_size": 100.0,
-    "strategy": "momentum",
-    "indicator_profile": "day_trading"
-  },
-  "database": {
-    "host": "localhost",
-    "port": 5432,
-    "user": "mantis",
-    "dbname": "mantis"
-  },
-  "data_collection": {
-    "scan_interval_secs": 60
-  }
-}
-```
-
-### Conservative Risk Profile
-
-```json
-{
-  "trading": {
-    "live_trading": false,
-    "max_position_size": 50.0,
-    "indicator_profile": "swing_trading",
-    "stop_loss": 3.0,
-    "take_profit": 8.0,
-    "max_volatility_24h": 20.0,
-    "min_volume": 100000.0,
-    "min_liquidity": 500000.0,
-    "max_positions": 3
-  },
-  "data_collection": {
-    "scan_interval_secs": 120
-  }
-}
-```
-
-### Aggressive Risk Profile (Paper Trading Recommended)
-
-```json
-{
-  "trading": {
-    "live_trading": false,
-    "max_position_size": 200.0,
-    "indicator_profile": "scalping",
-    "stop_loss": 8.0,
-    "take_profit": 15.0,
-    "max_volatility_24h": 50.0,
-    "min_volume": 25000.0,
-    "min_liquidity": 50000.0,
-    "max_positions": 10
-  },
-  "data_collection": {
-    "scan_interval_secs": 30
-  }
-}
-```
-
----
-
-## CLI Configuration Management
-
-### View Configuration
-
-```bash
-# View entire config
+# Show resolved config (config file + defaults; env vars are not shown here)
 mantis config show
 
-# View specific section
-mantis config get trading.strategy
-```
-
-### Update Configuration
-
-```bash
-# Set a value
-mantis config set trading.max_position_size 150.0
-mantis config set trading.strategy rsi
-
-# Set API keys
-mantis config set-key alchemy YOUR_KEY
-mantis config set-key infura YOUR_KEY
-```
-
-### Configuration Files
-
-```bash
-# Show config file location
+# Show the path to your config file
 mantis config path
+
+# Set any nested field
+mantis config set <dotted.key> <value>
+mantis config set trading.max_positions 3
+mantis config set trading.indicator_profile day_trading
+mantis config set anthropic_api_key sk-ant-api03-...
+mantis config set dex.network ethereum
+mantis config set solana.rpc_url https://mainnet.helius-rpc.com/?api-key=...
+
+# Special command for API keys (Ethereum RPC providers)
+mantis config set-key alchemy YOUR_ALCHEMY_KEY
+mantis config set-key infura YOUR_INFURA_KEY
+
+# Read a single field
+mantis config get trading.max_positions
+
+# Reset to defaults (be careful)
+mantis config reset
 ```
 
 ---
 
-## Validation
+## Common setups
 
-The bot validates all configuration values on startup:
-
-- Numeric ranges (e.g., percentages must be 0-100)
-- Required fields
-- Logical consistency (e.g., min < max)
-- API key format
-- Database connectivity
-
-If validation fails, the bot will show clear error messages indicating which values need correction.
-
----
-
-## Getting Help
-
-For more information:
+### Solana paper mode (recommended default)
 
 ```bash
-# General help
-mantis --help
-
-# Config command help
-mantis config --help
-
-# Trading command help
-mantis trading --help
+mantis config set anthropic_api_key sk-ant-api03-...
+# That's it. DexScreener is keyless. Default network is already Solana.
+mantis trading start --strategy momentum --interval 15 --indicator-profile scalping
 ```
+
+### Ethereum paper mode
+
+```bash
+mantis config set dex.network ethereum
+mantis config set-key alchemy YOUR_ALCHEMY_KEY
+mantis config set anthropic_api_key sk-ant-api03-...
+mantis trading start --strategy momentum --interval 60 --indicator-profile day_trading
+```
+
+### Ethereum live mode
+
+> ⚠️ Live trading uses real funds. Use a dedicated wallet with only what you can lose.
+
+```bash
+mantis config set dex.network ethereum
+mantis config set-key alchemy YOUR_ALCHEMY_KEY
+mantis config set anthropic_api_key sk-ant-api03-...
+mantis config set dex.wallet.private_key_env MANTIS_PRIVATE_KEY
+mantis config set trading.live_trading true
+mantis config set trading.max_position_size 20.0   # start small
+mantis config set trading.max_positions 1          # one trade at a time
+
+export MANTIS_PRIVATE_KEY=0xYOUR_PRIVATE_KEY
+mantis trading start --strategy momentum --live
+```
+
+The wallet needs ~0.1 ETH to cover gas. The bot wraps ETH→WETH automatically before each buy.
+
+### Disable AI advisor (run without Claude)
+
+Just don't set `anthropic_api_key` and don't export `ANTHROPIC_API_KEY`. The bot logs:
+
+```
+AIAdvisorActor: no Anthropic API key — signals pass through without AI analysis
+```
+
+Strategy signals reach the risk layer unmodified, with confidence 75 and reasoning "AI advisor not configured."

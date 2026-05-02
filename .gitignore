@@ -45,3 +45,10 @@ local_notes.md
 # Runtime logs
 /logs/
 
+# Local developer scratch / bot output
+bot.log
+*.bot.log
+
+# Bot runtime state
+.mantis_state
+

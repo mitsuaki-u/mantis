@@ -3,6 +3,13 @@ name = "mantis"
 version = "0.1.0"
 edition = "2021"
 default-run = "mantis"
+description = "A Rust trading framework with chain-agnostic strategies, supervised actors, and an LLM advisor that audits every trade decision."
+license = "MIT"
+repository = "https://github.com/mitsuaki-u/mantis"
+authors = ["Mitsuaki Uchimoto"]
+readme = "README.md"
+keywords = ["trading", "solana", "ethereum", "ai", "actor-model"]
+categories = ["finance", "command-line-utilities"]
 
 [lib]
 name = "mantis"
@@ -10,7 +17,7 @@ path = "src/lib.rs"
 
 [[bin]]
 name = "mantis"
-path = "src/bin/cli/src/honeybadger.rs"
+path = "src/bin/cli/src/mantis.rs"
 
 [dependencies]
 clap = { version = "4.4", features = ["derive"] }

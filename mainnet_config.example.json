@@ -1,4 +1,5 @@
 {
+  "anthropic_api_key": null,
   "api_keys": {
     "infura": null,
     "alchemy": "YOUR_ALCHEMY_API_KEY_HERE"
@@ -16,7 +17,6 @@
     "stop_loss": 4.0,
     "take_profit": 4.0,
     "max_positions": 10,
-    "risk_tolerance": 5,
     "rsi_weight": 0.3,
     "macd_weight": 0.3,
     "bollinger_weight": 0.2,
@@ -27,9 +27,8 @@
     "max_drawdown": 30.0,
     "max_trade_risk_pct": 20.0,
     "max_volatility_24h": 30.0,
-    "min_eth_balance": 0.1,
+    "min_native_balance": 0.1,
     "tokens_to_track": [],
-    "market_data_provider": "alchemy",
     "max_gas_cost_usd": 8.0,
     "max_gas_cost_percentage": 8.0,
     "transaction_priority": "Standard",
@@ -44,7 +43,6 @@
     "dbname": "mantis",
     "pool_max_size": 50
   },
-  "api": {},
   "data_collection": {
     "scan_interval_secs": 120,
     "history_days": 30,
@@ -57,15 +55,19 @@
     "primary_provider": "alchemy"
   },
   "dex": {
-    "network": "ethereum",
-    "protocol": "uniswap_v3",
-    "subgraph_url": "YOUR_SATSUMA_SUBGRAPH_URL_HERE",
+    "network": "solana",
+    "protocol": "jupiter",
     "custom_rpc_url": null,
     "router_address": null,
     "weth_address": null,
     "stablecoin_address": null,
     "wallet": null,
     "paper_simulated_weth_balance": 10.0
+  },
+  "solana": {
+    "rpc_url": null,
+    "network": "mainnet",
+    "keypair_path": null
   },
   "cache": {
     "enabled": false,
